@@ -11,6 +11,7 @@ Extends ATGNN (Singh et al., 2024) with:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio
 from torch_geometric.nn import knn_graph
 from torch_geometric.utils import to_dense_adj
 import numpy as np
@@ -238,6 +239,67 @@ class CNNBackbone(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# MERT Backbone (music-specific self-supervised model)
+# ---------------------------------------------------------------------------
+
+class MERTBackbone(nn.Module):
+    """
+    MERT backbone for music understanding.
+    Uses m-a-p/MERT-v1-95M — a music-specific self-supervised model trained
+    on large-scale music audio with masked modelling objectives.
+
+    Outputs (B, out_dim, 1, max_nodes) to be drop-in compatible with CNN path.
+    Last 2 transformer layers are unfrozen for fine-tuning; rest are frozen.
+    """
+
+    MERT_SR    = 24000   # MERT expects 24 kHz audio
+    FRAME_SHIFT = 320    # samples per output frame at 24 kHz
+
+    def __init__(self, model_id="m-a-p/MERT-v1-95M", out_dim=128,
+                 max_nodes=512, input_sr=16000):
+        super().__init__()
+        from transformers import AutoModel
+
+        self.input_sr  = input_sr
+        self.max_nodes = max_nodes
+
+        print(f"  Loading MERT backbone: {model_id}")
+        self.mert = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+        hidden_dim = self.mert.config.hidden_size   # 768 for MERT-v1-95M
+
+        # Freeze all layers, unfreeze last 2 transformer blocks for fine-tuning
+        for p in self.mert.parameters():
+            p.requires_grad = False
+        for layer in self.mert.encoder.layers[-2:]:
+            for p in layer.parameters():
+                p.requires_grad = True
+
+        self.proj = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, waveform):
+        """
+        waveform : (B, 1, T)  raw audio at self.input_sr
+        returns  : (B, out_dim, 1, max_nodes)  CNN-compatible patch tensor
+        """
+        x = waveform.squeeze(1)   # (B, T)
+
+        # Resample to MERT's expected sample rate
+        if self.input_sr != self.MERT_SR:
+            x = torchaudio.functional.resample(x, self.input_sr, self.MERT_SR)
+
+        out   = self.mert(x, output_hidden_states=False)
+        feats = out.last_hidden_state          # (B, T_frames, hidden_dim)
+        feats = self.proj(feats)               # (B, T_frames, out_dim)
+
+        # Pool time dimension to max_nodes
+        feats = feats.permute(0, 2, 1)        # (B, out_dim, T_frames)
+        feats = F.adaptive_avg_pool1d(feats, self.max_nodes)
+        feats = feats.unsqueeze(2)            # (B, out_dim, 1, max_nodes)
+
+        return feats
+
+
+# ---------------------------------------------------------------------------
 # Full H-ATGNN
 # ---------------------------------------------------------------------------
 
@@ -250,8 +312,17 @@ class HATGNN(nn.Module):
         pd = cfg.patch_dim
 
         # --- Backbone ---
-        self.backbone = CNNBackbone(out_dim=pd)
-        self.pos_emb  = nn.Parameter(torch.randn(cfg.max_nodes, pd) * 0.02)
+        self.backbone_type = cfg.backbone
+        if cfg.backbone == "mert":
+            self.backbone = MERTBackbone(
+                model_id=cfg.mert_model_id,
+                out_dim=pd,
+                max_nodes=cfg.max_nodes,
+                input_sr=cfg.sample_rate,
+            )
+        else:
+            self.backbone = CNNBackbone(out_dim=pd)
+        self.pos_emb = nn.Parameter(torch.randn(cfg.max_nodes, pd) * 0.02)
 
         # --- PGN blocks ---
         self.pgn_blocks = nn.ModuleList([
@@ -319,15 +390,19 @@ class HATGNN(nn.Module):
             self.genre_emb.weight.copy_(_proj(genre_vecs))
             self.subgenre_emb.weight.copy_(_proj(sub_vecs))
 
-    def forward(self, spec, clap_emb=None):
+    def forward(self, spec, clap_emb=None, waveform=None):
         """
-        spec     : (B, 1, F, T)   log-mel spectrogram
+        spec     : (B, 1, F, T)   log-mel spectrogram  (used by CNN backbone)
         clap_emb : (B, clap_dim)  optional CLAP audio embedding
+        waveform : (B, 1, T)      raw audio             (used by MERT backbone)
         """
         B = spec.size(0)
 
-        # --- CNN backbone -> patch nodes ---
-        feat = self.backbone(spec)                       # (B, pd, H, W)
+        # --- Backbone -> patch nodes ---
+        if self.backbone_type == "mert":
+            feat = self.backbone(waveform)               # (B, pd, 1, N)
+        else:
+            feat = self.backbone(spec)                   # (B, pd, H, W)
         H, W = feat.shape[2], feat.shape[3]
         N = H * W
         feat = feat.flatten(2).permute(0, 2, 1)          # (B, N, pd)

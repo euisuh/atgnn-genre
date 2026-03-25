@@ -10,11 +10,16 @@ import torch
 
 @dataclass
 class HATGNNConfig:
+    # ── Backbone ─────────────────────────────────────────────────────────────
+    backbone:       str   = "cnn"                # "cnn" | "mert"
+    mert_model_id:  str   = "m-a-p/MERT-v1-95M"
+    mert_max_nodes: int   = 512                  # MERT frame nodes after pooling
+
     # ── Model dims ──────────────────────────────────────────────────────────
-    patch_dim:  int = 128      # CNN backbone output channels
+    patch_dim:  int = 128      # CNN backbone output channels (or MERT proj dim)
     label_dim:  int = 128      # label embedding dimension
     clap_dim:   int = 512      # CLAP audio embedding dim (LAION-CLAP default)
-    max_nodes:  int = 256      # max patch nodes (F/8 * T/8)
+    max_nodes:  int = 2048     # max patch nodes — set automatically by build_config
 
     # ── Graph ───────────────────────────────────────────────────────────────
     k:      int = 9            # k-NN for PGN
@@ -25,7 +30,7 @@ class HATGNNConfig:
     n_mood:     int = 8        # e.g. Joyful, Tense, Melancholic, Energetic,
                                #      Calm, Dark, Romantic, Aggressive
     n_genre:    int = 15       # e.g. Jazz, Rock, Classical, Electronic ...
-    n_subgenre: int = 50       # e.g. Bebop, Post-bop, Indie Rock ...
+    n_subgenre: int = 48       # e.g. Bebop, Post-bop, Indie Rock ...
 
     # These are filled by build_hierarchy() in utils/hierarchy.py
     hierarchy_mask:   Optional[torch.Tensor] = None
