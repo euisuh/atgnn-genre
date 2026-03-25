@@ -2,13 +2,20 @@
 # cloud/download_data.sh
 # Downloads MTG-Jamendo to Lambda persistent storage and symlinks it into the repo.
 #
-# Lambda Storage mounts at a path you choose when creating it (e.g. /home/ubuntu/storage).
+# MTG-Jamendo has 100 chunks (0-99), each ~3.2GB. Tracks are ordered by ID so
+# sequential chunks (e.g. 0-9) skew toward a narrow slice of the catalogue.
+# The default here downloads 20 evenly-spaced chunks (~64GB, ~100k tracks) to
+# get a representative genre/mood distribution across the full dataset.
+#
+# Lambda Storage mounts at a path you choose when creating it.
 # Set LAMBDA_STORAGE to that mount point before running.
 #
 # Usage:
 #   export LAMBDA_STORAGE=/home/ubuntu/storage   # set to your mount path
-#   bash cloud/download_data.sh                  # metadata + splits + chunks 0-9 (~32GB)
-#   bash cloud/download_data.sh --chunks 0 1 2   # specific chunks only
+#   bash cloud/download_data.sh                  # stratified 20 chunks (~64GB) [default]
+#   bash cloud/download_data.sh --small          # stratified 10 chunks (~32GB, quick test)
+#   bash cloud/download_data.sh --full           # all 100 chunks (~320GB, full dataset)
+#   bash cloud/download_data.sh --chunks 0 5 10  # specific chunks
 #   bash cloud/download_data.sh --meta_only      # metadata + splits only
 
 set -e
@@ -45,15 +52,31 @@ else
     echo "  Symlink ${REPO_DATA_LINK} already exists"
 fi
 
+# ── Chunk selection ───────────────────────────────────────────────────────────
+# Evenly-spaced chunks give a better genre/mood distribution than sequential ones.
+# 100 chunks total → step=5 gives 20 chunks, step=10 gives 10 chunks.
+STRATIFIED_20="0 5 10 15 20 25 30 35 40 45 50 55 60 65 70 75 80 85 90 95"
+STRATIFIED_10="0 10 20 30 40 50 60 70 80 90"
+ALL_CHUNKS=$(seq 0 99 | tr '\n' ' ')
+
 # ── Download ──────────────────────────────────────────────────────────────────
-# Parse args: forward everything to the Python download script.
-# Default: download chunks 0-9 (~32GB, ~50k tracks — enough for solid results).
-if [ "$#" -eq 0 ]; then
-    echo "  Downloading metadata + splits + chunks 0-9 (~32GB)"
+if [ "$1" = "--small" ]; then
+    echo "  Downloading stratified 10 chunks (~32GB)"
     python scripts/download_mtg_jamendo.py \
         --output "${DATASET_DIR}" \
-        --chunks 0 1 2 3 4 5 6 7 8 9
+        --chunks ${STRATIFIED_10}
+elif [ "$1" = "--full" ]; then
+    echo "  Downloading all 100 chunks (~320GB)"
+    python scripts/download_mtg_jamendo.py \
+        --output "${DATASET_DIR}" \
+        --chunks ${ALL_CHUNKS}
+elif [ "$#" -eq 0 ]; then
+    echo "  Downloading stratified 20 chunks (~64GB, recommended)"
+    python scripts/download_mtg_jamendo.py \
+        --output "${DATASET_DIR}" \
+        --chunks ${STRATIFIED_20}
 else
+    # Pass args directly (e.g. --chunks 3 7 42, or --meta_only)
     python scripts/download_mtg_jamendo.py \
         --output "${DATASET_DIR}" \
         "$@"
