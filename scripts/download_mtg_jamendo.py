@@ -34,15 +34,15 @@ from pathlib import Path
 # These are the official public URLs from the MTG GitHub repo.
 # Full list: https://github.com/MTG/mtg-jamendo-dataset/blob/master/scripts/download/zenodo.py
 
-ZENODO_BASE = "https://zenodo.org/record/4778563/files"
+GITHUB_DATA = "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data"
 
 METADATA_FILES = {
-    "autotagging.tsv":            f"{ZENODO_BASE}/autotagging.tsv",
-    "autotagging_genre.tsv":      f"{ZENODO_BASE}/autotagging_genre.tsv",
-    "autotagging_moodtheme.tsv":  f"{ZENODO_BASE}/autotagging_moodtheme.tsv",
-    "autotagging_instrument.tsv": f"{ZENODO_BASE}/autotagging_instrument.tsv",
-    "tracks.tsv":                 f"{ZENODO_BASE}/tracks.tsv",
-    "tags.tsv":                   f"{ZENODO_BASE}/tags.tsv",
+    "autotagging.tsv":            f"{GITHUB_DATA}/autotagging.tsv",
+    "autotagging_genre.tsv":      f"{GITHUB_DATA}/autotagging_genre.tsv",
+    "autotagging_moodtheme.tsv":  f"{GITHUB_DATA}/autotagging_moodtheme.tsv",
+    "autotagging_instrument.tsv": f"{GITHUB_DATA}/autotagging_instrument.tsv",
+    "tracks.tsv":                 f"{GITHUB_DATA}/tracks.tsv",
+    "tags.tsv":                   f"{GITHUB_DATA}/tags.tsv",
 }
 
 # Split files hosted on GitHub (no login needed)
@@ -62,7 +62,8 @@ SPLIT_FILES_GENRE = {
 
 # Audio chunks — each is a tar.gz of ~3.2GB containing ~5000 tracks
 # 100 chunks total = ~320GB. For experiments, chunks 0-9 (~32GB) is enough.
-AUDIO_CHUNK_URL = f"{ZENODO_BASE}/raw_30s_audio-{{chunk:02d}}.tar.gz"
+MTG_CDN_BASE = "https://cdn.freesound.org/mtg-jamendo/raw_30s/audio"
+AUDIO_CHUNK_URL = f"{MTG_CDN_BASE}/raw_30s_audio-{{chunk:02d}}.tar"
 N_AUDIO_CHUNKS  = 100
 
 
@@ -93,11 +94,11 @@ def download_file(url: str, dest: str, desc: str = ""):
 
 
 def extract_tar(tar_path: str, dest_dir: str):
-    """Extract tar.gz, placing audio files in dest_dir/audio/."""
+    """Extract tar (or tar.gz), placing audio files in dest_dir/audio/."""
     print(f"  Extracting {os.path.basename(tar_path)} ...")
     os.makedirs(dest_dir, exist_ok=True)
     result = subprocess.run(
-        ["tar", "-xzf", tar_path, "-C", dest_dir],
+        ["tar", "-xf", tar_path, "-C", dest_dir],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -187,7 +188,7 @@ def download_audio(output_dir: str, chunks: list):
 
     for chunk in chunks:
         url      = AUDIO_CHUNK_URL.format(chunk=chunk)
-        tar_path = os.path.join(output_dir, f"audio_chunk_{chunk:02d}.tar.gz")
+        tar_path = os.path.join(output_dir, f"audio_chunk_{chunk:02d}.tar")
         try:
             download_file(url, tar_path, f"audio chunk {chunk:02d}")
             extract_tar(tar_path, audio_dir)
