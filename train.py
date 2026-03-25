@@ -55,6 +55,9 @@ def parse_args():
     p.add_argument("--output_dir", type=str,   default="outputs")
     p.add_argument("--emb_path",   type=str,   default="embeddings/label_embs.pt",
                    help="Path to precomputed text LM embeddings")
+    p.add_argument("--backbone",   type=str,   default="cnn",
+                   choices=["cnn", "mert"],
+                   help="Backbone: 'cnn' (ATGNN-style) or 'mert' (MERT-v1-95M)")
     p.add_argument("--run_all_ablations", action="store_true",
                    help="Run all 6 ablation configs sequentially")
     p.add_argument("--device",     type=str,   default="cuda" if torch.cuda.is_available() else "cpu")
@@ -65,6 +68,15 @@ def parse_args():
 
 def build_config(args) -> HATGNNConfig:
     h = get_hierarchy_config()
+    backbone = getattr(args, "backbone", "cnn")
+    # max_nodes differs by backbone: MERT uses pooled frames, CNN uses spatial patches
+    if backbone == "mert":
+        max_nodes = 512
+    else:
+        # CNN: 3x stride-2 → F/8 * T/8 nodes
+        n_mels = 128
+        max_frames = 1024
+        max_nodes = (n_mels // 8) * (max_frames // 8)   # 2048
     cfg = HATGNNConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -75,6 +87,8 @@ def build_config(args) -> HATGNNConfig:
         use_text_init=args.text_init,
         use_hierarchy=args.hierarchy,
         use_clap=args.clap,
+        backbone=backbone,
+        max_nodes=max_nodes,
         **h,
     )
     return cfg
@@ -107,16 +121,16 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler,
     n_batches  = 0
 
     for batch in loader:
-        spec   = batch["spec"].to(device)
-        labels = batch["labels"].to(device)
-        clap_e = batch.get("clap_emb")
+        spec     = batch["spec"].to(device)
+        waveform = batch["waveform"].to(device)
+        labels   = batch["labels"].to(device)
+        clap_e   = batch.get("clap_emb")
         if clap_e is not None:
             clap_e = clap_e.to(device)
         elif use_clap:
-            # If CLAP embeddings not precomputed, skip fusion
             clap_e = None
 
-        preds = model(spec, clap_e)
+        preds = model(spec, clap_e, waveform=waveform)
         loss  = criterion(preds, labels)
 
         optimizer.zero_grad()
@@ -137,13 +151,14 @@ def evaluate_epoch(model, loader, device, cfg):
     all_preds, all_targets = [], []
 
     for batch in loader:
-        spec   = batch["spec"].to(device)
-        labels = batch["labels"].numpy()
-        clap_e = batch.get("clap_emb")
+        spec     = batch["spec"].to(device)
+        waveform = batch["waveform"].to(device)
+        labels   = batch["labels"].numpy()
+        clap_e   = batch.get("clap_emb")
         if clap_e is not None:
             clap_e = clap_e.to(device)
 
-        preds = model(spec, clap_e).cpu().numpy()
+        preds = model(spec, clap_e, waveform=waveform).cpu().numpy()
         all_preds.append(preds)
         all_targets.append(labels)
 

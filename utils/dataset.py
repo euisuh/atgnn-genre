@@ -93,7 +93,13 @@ class MTGJamendoDataset(Dataset):
         with open(split_file, "r") as f:
             reader = csv.DictReader(f, delimiter="\t")
             for row in reader:
-                items.append(row)
+                # Normalise column names to lowercase (skip None overflow keys)
+                row = {k.lower(): v for k, v in row.items() if k is not None}
+                # Only keep tracks whose audio file is present
+                audio_path = os.path.join(self.root, "audio", row["path"])
+                if os.path.exists(audio_path):
+                    items.append(row)
+        print(f"  [{self.split}] {len(items)} tracks with audio found")
         return items
 
     def _parse_labels(self, row: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -173,11 +179,8 @@ class MTGJamendoDataset(Dataset):
     def __getitem__(self, idx):
         row = self.items[idx]
 
-        # Build audio path (MTG-Jamendo stores files in 2-digit subdirs)
-        track_id = row["track_id"].zfill(7)
-        subdir   = track_id[:2]
-        audio_path = os.path.join(self.root, "audio", subdir,
-                                  f"track_{track_id}.mp3")
+        track_id   = row["track_id"]
+        audio_path = os.path.join(self.root, "audio", row["path"])
 
         waveform = self._load_audio(audio_path)
         spec     = self._to_logmel(waveform)          # (1, F, T)
@@ -188,9 +191,18 @@ class MTGJamendoDataset(Dataset):
         mood_vec, genre_vec, sub_vec = self._parse_labels(row)
         labels = np.concatenate([mood_vec, genre_vec, sub_vec])
 
+        # Pad/crop waveform to fixed length (max_frames * hop_len samples)
+        max_samples = self.max_frames * self.hop_len
+        T = waveform.shape[-1]
+        if T < max_samples:
+            waveform = F.pad(waveform, (0, max_samples - T))
+        else:
+            waveform = waveform[..., :max_samples]
+
         return {
-            "spec":   spec,
-            "labels": torch.tensor(labels, dtype=torch.float),
+            "spec":     spec,
+            "waveform": waveform,
+            "labels":   torch.tensor(labels, dtype=torch.float),
             "track_id": track_id,
         }
 
@@ -198,19 +210,21 @@ class MTGJamendoDataset(Dataset):
 def collate_mixup(batch, alpha=0.5):
     """
     Mixup augmentation at the batch level.
-    Mixes pairs of (spec, label) within the batch.
+    Mixes pairs of (spec, waveform, label) within the batch.
     """
-    specs   = torch.stack([b["spec"]   for b in batch])
-    labels  = torch.stack([b["labels"] for b in batch])
-    ids     = [b["track_id"] for b in batch]
+    specs     = torch.stack([b["spec"]     for b in batch])
+    waveforms = torch.stack([b["waveform"] for b in batch])
+    labels    = torch.stack([b["labels"]   for b in batch])
+    ids       = [b["track_id"] for b in batch]
 
     if alpha > 0 and np.random.random() > 0.5:
         lam  = np.random.beta(alpha, alpha)
         perm = torch.randperm(specs.size(0))
-        specs  = lam * specs  + (1 - lam) * specs[perm]
-        labels = lam * labels + (1 - lam) * labels[perm]
+        specs     = lam * specs     + (1 - lam) * specs[perm]
+        waveforms = lam * waveforms + (1 - lam) * waveforms[perm]
+        labels    = lam * labels    + (1 - lam) * labels[perm]
 
-    return {"spec": specs, "labels": labels, "track_id": ids}
+    return {"spec": specs, "waveform": waveforms, "labels": labels, "track_id": ids}
 
 
 def get_dataloaders(cfg):
