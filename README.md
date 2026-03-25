@@ -142,22 +142,95 @@ Numbers are targets based on literature estimates. Actual results may vary.
 The rare sub-genre gap (mAP_common - mAP_rare) narrows most dramatically
 for H-ATGNN vs all baselines and AST. This is the core publishable claim.
 
+## Running on a cloud GPU (Lambda Labs)
+
+Local CPU training is only suitable for smoke tests. For real experiments use a
+cloud GPU instance with persistent storage so the dataset survives across runs.
+
+### Recommended setup
+
+| Need | Recommendation | Why |
+|------|---------------|-----|
+| GPU instance | [Lambda Labs](https://lambdalabs.com/service/gpu-cloud) | Simple hourly billing, A100s available |
+| Persistent storage | Lambda Filesystem | Attaches to any instance; dataset survives termination |
+| Instance for CNN runs | A10 (24 GB, ~$0.75/hr) | Fits batch_size=32 comfortably |
+| Instance for MERT runs | A100 40 GB (~$1.29/hr) | MERT needs ≥24 GB VRAM for batch_size=16 |
+| Storage size | 100 GB filesystem | 64 GB data + outputs headroom |
+
+### One-time: create persistent storage
+
+1. Lambda Cloud dashboard → **Storage → Create filesystem**
+2. Name it `mtg-jamendo`, pick the same region as your instances
+3. Note the mount path shown (e.g. `/home/ubuntu/storage`)
+
+### Every new instance: 3-step setup
+
+```bash
+# 1. Clone repo
+git clone https://github.com/euisuh/atgnn-genre.git
+cd atgnn-genre
+
+# 2. Install dependencies (~3 min, auto-detects CUDA version)
+bash cloud/setup.sh
+
+# 3. Download dataset to persistent storage (first time only, ~64 GB)
+export LAMBDA_STORAGE=/home/ubuntu/storage    # adjust to your mount path
+bash cloud/download_data.sh                   # stratified 20 chunks — recommended
+# bash cloud/download_data.sh --small         # 10 chunks ~32 GB, quick test
+# bash cloud/download_data.sh --full          # all 100 chunks ~320 GB
+```
+
+If the storage already has the dataset from a previous instance, step 3 just
+re-creates the symlinks instantly — no re-download needed.
+
+### Running experiments on the cluster
+
+```bash
+export LAMBDA_STORAGE=/home/ubuntu/storage
+
+# Table 1 — all 6 CNN ablations
+bash cloud/run_experiment.sh --run_all_ablations --epochs 50
+
+# Table 2 — MERT backbone
+bash cloud/run_experiment.sh --backbone mert --text_init --hierarchy --clap \
+    --run_name hatgnn_mert --epochs 50
+
+# Lambda sweep
+for lam in 0.1 0.3 0.5 1.0; do
+    bash cloud/run_experiment.sh --text_init --hierarchy --clap \
+        --lam $lam --run_name lam_${lam} --epochs 50
+done
+```
+
+Results are saved to `${LAMBDA_STORAGE}/outputs/` and persist after instance
+termination. Pull them back locally with:
+
+```bash
+rsync -avz ubuntu@<instance-ip>:/home/ubuntu/storage/outputs/ outputs/
+```
+
+---
+
 ## Project structure
 
 ```
-hatgnn/
-  models/
-    hatgnn.py          Main model: PGN, H-PLG, H-LLG, GatedFusion
-  utils/
-    hierarchy.py       Mood->genre->sub-genre ontology + mask builder
-    dataset.py         MTG-Jamendo dataset loader with mixup + SpecAugment
-    text_embeddings.py Sentence-transformer label embedding generator
-    metrics.py         mAP, consistency score, rare class metrics
-  configs/
-    default.py         HATGNNConfig dataclass
-  train.py             Training script + ablation runner
-  requirements.txt
-  README.md
+models/
+  hatgnn.py          Main model: CNNBackbone, MERTBackbone, PGN, H-PLG, H-LLG
+utils/
+  hierarchy.py       Mood->genre->sub-genre ontology + mask builder
+  dataset.py         MTG-Jamendo dataset loader with mixup + SpecAugment
+  text_embeddings.py Sentence-transformer label embedding generator
+  metrics.py         mAP, consistency score, rare class metrics
+configs/
+  default.py         HATGNNConfig dataclass
+cloud/
+  setup.sh           Dependency installer (auto-detects CUDA version)
+  download_data.sh   Dataset downloader with stratified chunk selection
+  run_experiment.sh  End-to-end launcher (data check → embeddings → train)
+train.py             Training script + ablation runner
+scripts/
+  verify_setup.py    Environment checker
+  download_mtg_jamendo.py  Dataset download utility
 ```
 
 ## Citation
