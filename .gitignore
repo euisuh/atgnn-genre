@@ -1,0 +1,31 @@
+# Data
+data/
+embeddings/
+
+# Outputs / checkpoints
+outputs/
+*.pt
+*.pth
+*.ckpt
+
+# Virtual environment
+genre/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+wandb/
