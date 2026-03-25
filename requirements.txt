@@ -1,0 +1,10 @@
+torch
+torchaudio
+torch-geometric
+torch-scatter
+torch-sparse
+sentence-transformers
+transformers
+scikit-learn
+numpy
+tqdm
