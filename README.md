@@ -19,23 +19,43 @@ Three ablation axes:
 ## Setup
 
 ```bash
+# 1. Install core 
 pip install torch torchaudio
 pip install --no-build-isolation torch-scatter
 pip install --no-build-isolation torch-sparse
-
 pip install -r requirements.txt
 
-# Install PyG (match your CUDA version)
+# 2. Install PyG — match your CUDA version:
+#    CUDA 11.8:
 pip install torch-geometric
 pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cu118.html
+#    CUDA 12.1:
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+#    CPU only:
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cpu.html
+
+# 3. (Optional) CLAP backend — pick one:
+pip install laion-clap          # recommended, faster
+# OR: transformers already in requirements.txt covers this
+
+# 4. Verify everything is installed correctly
+python scripts/verify_setup.py
 ```
 
 ## Data
 
-Download MTG-Jamendo:
 ```bash
-# Instructions: https://github.com/MTG/mtg-jamendo-dataset
-python scripts/download_mtg_jamendo.py --output data/mtg_jamendo
+# Download metadata + splits only (fast, ~50MB, no audio yet)
+python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --meta_only
+
+# Download audio — chunk 0 only (~3.2GB, ~5000 tracks, enough for a quick test)
+python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --chunks 0
+
+# Download more chunks for full experiments (each ~3.2GB, 100 chunks total)
+python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --chunks 0 1 2 3 4
+
+# Verify the download
+python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --verify
 ```
 
 Expected structure:
