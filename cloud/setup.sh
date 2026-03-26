@@ -1,6 +1,7 @@
 #!/bin/bash
 # cloud/setup.sh
-# Run once on a fresh Lambda Labs instance to install all dependencies.
+# Run once on a fresh RunPod pod (or Lambda Labs instance) to install all dependencies.
+# RunPod runs as root — sudo is not needed but harmless.
 #
 # Usage:
 #   bash cloud/setup.sh
@@ -8,7 +9,7 @@
 set -e
 
 echo "============================================"
-echo "  H-ATGNN environment setup (Lambda Labs)"
+echo "  H-ATGNN environment setup (RunPod / Lambda)"
 echo "============================================"
 
 # ── Detect torch + CUDA versions ──────────────────────────────────────────────

@@ -1,6 +1,6 @@
 #!/bin/bash
 # cloud/run_experiment.sh
-# Full experiment launcher for Lambda Labs.
+# Full experiment launcher for RunPod (and compatible with Lambda Labs).
 # Runs setup checks, generates embeddings (if needed), then trains.
 #
 # Usage:
@@ -10,7 +10,7 @@
 #   # SSL experiments (Table 2: MERT + MuQ)
 #   bash cloud/run_experiment.sh --run_ssl_experiments --epochs 50
 #
-#   # Auto-shutdown when done (instance powers off, billing stops)
+#   # Auto-shutdown when done (pod terminates, billing stops)
 #   AUTO_SHUTDOWN=1 bash cloud/run_experiment.sh --run_all_ablations --epochs 50
 #
 #   # Lambda sweep
@@ -26,14 +26,17 @@ if [ -f ".env" ]; then
     set -a && source .env && set +a
 fi
 
-LAMBDA_STORAGE=${LAMBDA_STORAGE:-/home/ubuntu/storage}
-DATASET_DIR="${LAMBDA_STORAGE}/mtg_jamendo"
-EMB_DIR="${LAMBDA_STORAGE}/embeddings"
-OUTPUTS_DIR="${LAMBDA_STORAGE}/outputs"
-HF_CACHE_DIR="${LAMBDA_STORAGE}/hf_cache"
+# RunPod: persistent Network Volume mounts at /runpod-volume by default
+# Lambda Labs: use /home/ubuntu/storage
+# Override by setting STORAGE_ROOT in .env or environment
+STORAGE_ROOT=${STORAGE_ROOT:-/runpod-volume}
+DATASET_DIR="${STORAGE_ROOT}/mtg_jamendo"
+EMB_DIR="${STORAGE_ROOT}/embeddings"
+OUTPUTS_DIR="${STORAGE_ROOT}/outputs"
+HF_CACHE_DIR="${STORAGE_ROOT}/hf_cache"
 
 # Store HuggingFace model weights on persistent storage so they survive
-# instance shutdown and don't need to be re-downloaded next time
+# pod termination and don't need to be re-downloaded next time
 mkdir -p "${HF_CACHE_DIR}"
 export HF_HOME="${HF_CACHE_DIR}"
 export TRANSFORMERS_CACHE="${HF_CACHE_DIR}"
@@ -60,7 +63,7 @@ fi
 
 echo "============================================"
 echo "  H-ATGNN experiment launcher"
-echo "  Storage  : ${LAMBDA_STORAGE}"
+echo "  Storage  : ${STORAGE_ROOT}"
 echo "  W&B      : ${WANDB_PROJECT:-disabled}"
 echo "  Args     : $@"
 echo "============================================"
