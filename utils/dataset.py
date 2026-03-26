@@ -54,6 +54,7 @@ class MTGJamendoDataset(Dataset):
         time_mask: int = 192,
         freq_mask: int = 48,
         augment: bool = True,
+        cross_modal_emb_dir: Optional[str] = None,  # dir of precomputed .pt embeddings
     ):
         self.root       = root
         self.split      = split
@@ -66,6 +67,7 @@ class MTGJamendoDataset(Dataset):
         self.time_mask  = time_mask
         self.freq_mask  = freq_mask
         self.augment    = augment and (split == "train")
+        self.cross_modal_emb_dir = cross_modal_emb_dir
 
         # Build label vocabs
         self.mood_to_idx    = {m: i for i, m in enumerate(MOODS)}
@@ -199,12 +201,22 @@ class MTGJamendoDataset(Dataset):
         else:
             waveform = waveform[..., :max_samples]
 
-        return {
+        item = {
             "spec":     spec,
             "waveform": waveform,
             "labels":   torch.tensor(labels, dtype=torch.float),
             "track_id": track_id,
         }
+
+        # Load precomputed cross-modal embedding (CLAP or MuQ-MuLan) if available
+        if self.cross_modal_emb_dir:
+            rel_stem = os.path.splitext(row["path"])[0]   # e.g. "00/track_0000000"
+            emb_path = os.path.join(self.cross_modal_emb_dir, rel_stem + ".pt")
+            if os.path.exists(emb_path):
+                item["cross_modal_emb"] = torch.load(emb_path, map_location="cpu",
+                                                      weights_only=True)
+
+        return item
 
 
 def collate_mixup(batch, alpha=0.5):
@@ -217,18 +229,35 @@ def collate_mixup(batch, alpha=0.5):
     labels    = torch.stack([b["labels"]   for b in batch])
     ids       = [b["track_id"] for b in batch]
 
+    # Cross-modal embeddings are optional (only present if precomputed emb dir set)
+    cm_embs = None
+    if "cross_modal_emb" in batch[0]:
+        cm_list = [b.get("cross_modal_emb") for b in batch]
+        if all(e is not None for e in cm_list):
+            cm_embs = torch.stack(cm_list)
+
     if alpha > 0 and np.random.random() > 0.5:
         lam  = np.random.beta(alpha, alpha)
         perm = torch.randperm(specs.size(0))
         specs     = lam * specs     + (1 - lam) * specs[perm]
         waveforms = lam * waveforms + (1 - lam) * waveforms[perm]
         labels    = lam * labels    + (1 - lam) * labels[perm]
+        if cm_embs is not None:
+            cm_embs = lam * cm_embs + (1 - lam) * cm_embs[perm]
 
-    return {"spec": specs, "waveform": waveforms, "labels": labels, "track_id": ids}
+    out = {"spec": specs, "waveform": waveforms, "labels": labels, "track_id": ids}
+    if cm_embs is not None:
+        out["cross_modal_emb"] = cm_embs
+    return out
 
 
 def get_dataloaders(cfg):
     from functools import partial
+
+    # Resolve cross-modal embedding dir for precomputed embeddings
+    cm_emb_dir = cfg.cross_modal_emb_dir or None
+    if cm_emb_dir and not os.path.isabs(cm_emb_dir):
+        cm_emb_dir = os.path.join(cfg.data_root, cm_emb_dir)
 
     train_ds = MTGJamendoDataset(
         root=cfg.data_root, split="train",
@@ -238,18 +267,21 @@ def get_dataloaders(cfg):
         mixup_alpha=cfg.mixup_alpha,
         time_mask=cfg.time_mask, freq_mask=cfg.freq_mask,
         augment=True,
+        cross_modal_emb_dir=cm_emb_dir,
     )
     val_ds = MTGJamendoDataset(
         root=cfg.data_root, split="validation",
         sample_rate=cfg.sample_rate, n_mels=cfg.n_mels,
         hop_ms=cfg.hop_ms, win_ms=cfg.win_ms,
         max_frames=cfg.max_frames, augment=False,
+        cross_modal_emb_dir=cm_emb_dir,
     )
     test_ds = MTGJamendoDataset(
         root=cfg.data_root, split="test",
         sample_rate=cfg.sample_rate, n_mels=cfg.n_mels,
         hop_ms=cfg.hop_ms, win_ms=cfg.win_ms,
         max_frames=cfg.max_frames, augment=False,
+        cross_modal_emb_dir=cm_emb_dir,
     )
 
     collate = partial(collate_mixup, alpha=cfg.mixup_alpha)

@@ -23,6 +23,7 @@ import argparse
 import json
 import time
 from copy import deepcopy
+from typing import Dict
 
 import numpy as np
 import torch
@@ -55,11 +56,16 @@ def parse_args():
     p.add_argument("--output_dir", type=str,   default="outputs")
     p.add_argument("--emb_path",   type=str,   default="embeddings/label_embs.pt",
                    help="Path to precomputed text LM embeddings")
-    p.add_argument("--backbone",   type=str,   default="cnn",
-                   choices=["cnn", "mert"],
-                   help="Backbone: 'cnn' (ATGNN-style) or 'mert' (MERT-v1-95M)")
+    p.add_argument("--backbone",     type=str, default="cnn",
+                   choices=["cnn", "mert", "muq"],
+                   help="Audio backbone: cnn | mert (MERT-v1-95M) | muq (MuQ)")
+    p.add_argument("--cross_modal", type=str, default="none",
+                   choices=["none", "clap", "muqmulan"],
+                   help="Cross-modal fusion: none | clap | muqmulan (MuQ-MuLan)")
     p.add_argument("--run_all_ablations", action="store_true",
-                   help="Run all 6 ablation configs sequentially")
+                   help="Run all 6 CNN ablation configs sequentially (Table 1)")
+    p.add_argument("--run_ssl_experiments", action="store_true",
+                   help="Run all SSL backbone experiments (Table 2: MERT + MuQ)")
     p.add_argument("--device",     type=str,   default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -69,14 +75,19 @@ def parse_args():
 def build_config(args) -> HATGNNConfig:
     h = get_hierarchy_config()
     backbone = getattr(args, "backbone", "cnn")
-    # max_nodes differs by backbone: MERT uses pooled frames, CNN uses spatial patches
-    if backbone == "mert":
+    cross_modal = getattr(args, "cross_modal", "none")
+
+    # Backward compat: --clap flag maps to --cross_modal clap
+    if getattr(args, "clap", False) and cross_modal == "none":
+        cross_modal = "clap"
+
+    # max_nodes: SSL backbones pool to 512 frames; CNN uses spatial patches
+    if backbone in ("mert", "muq"):
         max_nodes = 512
     else:
-        # CNN: 3x stride-2 → F/8 * T/8 nodes
-        n_mels = 128
-        max_frames = 1024
+        n_mels, max_frames = 128, 1024
         max_nodes = (n_mels // 8) * (max_frames // 8)   # 2048
+
     cfg = HATGNNConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -86,7 +97,7 @@ def build_config(args) -> HATGNNConfig:
         output_dir=args.output_dir,
         use_text_init=args.text_init,
         use_hierarchy=args.hierarchy,
-        use_clap=args.clap,
+        cross_modal=cross_modal,
         backbone=backbone,
         max_nodes=max_nodes,
         **h,
@@ -114,8 +125,7 @@ def get_lr_scheduler(optimizer, warmup_steps: int, total_steps: int,
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def train_one_epoch(model, loader, criterion, optimizer, scheduler,
-                    device, use_clap=False):
+def train_one_epoch(model, loader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0.0
     n_batches  = 0
@@ -124,13 +134,11 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler,
         spec     = batch["spec"].to(device)
         waveform = batch["waveform"].to(device)
         labels   = batch["labels"].to(device)
-        clap_e   = batch.get("clap_emb")
-        if clap_e is not None:
-            clap_e = clap_e.to(device)
-        elif use_clap:
-            clap_e = None
+        cm_emb   = batch.get("cross_modal_emb")
+        if cm_emb is not None:
+            cm_emb = cm_emb.to(device)
 
-        preds = model(spec, clap_e, waveform=waveform)
+        preds = model(spec, cm_emb, waveform=waveform)
         loss  = criterion(preds, labels)
 
         optimizer.zero_grad()
@@ -154,11 +162,11 @@ def evaluate_epoch(model, loader, device, cfg):
         spec     = batch["spec"].to(device)
         waveform = batch["waveform"].to(device)
         labels   = batch["labels"].numpy()
-        clap_e   = batch.get("clap_emb")
-        if clap_e is not None:
-            clap_e = clap_e.to(device)
+        cm_emb   = batch.get("cross_modal_emb")
+        if cm_emb is not None:
+            cm_emb = cm_emb.to(device)
 
-        preds = model(spec, clap_e, waveform=waveform).cpu().numpy()
+        preds = model(spec, cm_emb, waveform=waveform).cpu().numpy()
         all_preds.append(preds)
         all_targets.append(labels)
 
@@ -180,7 +188,8 @@ def run_experiment(cfg, run_name: str, device: str,
 
     print(f"\n{'='*60}")
     print(f"  Run: {run_name}")
-    print(f"  text_init={cfg.use_text_init}  hierarchy={cfg.use_hierarchy}  clap={cfg.use_clap}")
+    print(f"  backbone={cfg.backbone}  text_init={cfg.use_text_init}  "
+          f"hierarchy={cfg.use_hierarchy}  cross_modal={cfg.cross_modal}")
     print(f"{'='*60}")
 
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -226,8 +235,7 @@ def run_experiment(cfg, run_name: str, device: str,
     for epoch in range(1, cfg.epochs + 1):
         t0 = time.time()
         train_loss = train_one_epoch(model, train_loader, criterion,
-                                      optimizer, scheduler, device,
-                                      use_clap=cfg.use_clap)
+                                      optimizer, scheduler, device)
         val_metrics = evaluate_epoch(model, val_loader, device, cfg)
         elapsed     = time.time() - t0
 
@@ -254,10 +262,11 @@ def run_experiment(cfg, run_name: str, device: str,
     results = {
         "run_name":    run_name,
         "config": {
-            "text_init": cfg.use_text_init,
-            "hierarchy": cfg.use_hierarchy,
-            "clap":      cfg.use_clap,
-            "lam":       cfg.lam,
+            "backbone":     cfg.backbone,
+            "text_init":    cfg.use_text_init,
+            "hierarchy":    cfg.use_hierarchy,
+            "cross_modal":  cfg.cross_modal,
+            "lam":          cfg.lam,
         },
         "best_val_mAP":  best_map,
         "test_metrics":  test_metrics,
@@ -271,58 +280,102 @@ def run_experiment(cfg, run_name: str, device: str,
 
 # ── Ablation suite ────────────────────────────────────────────────────────────
 
-ABLATION_CONFIGS = [
-    # (name,            text_init, hierarchy, clap)
-    ("baseline",        False,     False,     False),
-    ("text_init_only",  True,      False,     False),
-    ("hierarchy_only",  False,     True,      False),
-    ("clap_only",       False,     False,     True),
-    ("text_hierarchy",  True,      True,      False),
-    ("full_hatgnn",     True,      True,      True),
+# ── Table 1: CNN ablation suite ───────────────────────────────────────────────
+# (name,            text_init, hierarchy, cross_modal)
+CNN_ABLATION_CONFIGS = [
+    ("baseline",        False, False, "none"),
+    ("text_init_only",  True,  False, "none"),
+    ("hierarchy_only",  False, True,  "none"),
+    ("clap_only",       False, False, "clap"),
+    ("text_hierarchy",  True,  True,  "none"),
+    ("full_hatgnn",     True,  True,  "clap"),
+]
+
+# ── Table 2: SSL backbone experiments ─────────────────────────────────────────
+# Exp 2a: MuQ backbone (H-ATGNN extensions on top)
+# Exp 2b: MuQ + MuQ-MuLan (replaces CLAP with same-family cross-modal)
+SSL_CONFIGS = [
+    # (name,                  backbone, text_init, hierarchy, cross_modal)
+    ("mert_baseline",         "mert",   False, False, "none"),
+    ("hatgnn_mert",           "mert",   True,  True,  "clap"),
+    ("muq_baseline",          "muq",    False, False, "none"),
+    ("hatgnn_muq",            "muq",    True,  True,  "clap"),
+    ("hatgnn_muq_muqmulan",   "muq",    True,  True,  "muqmulan"),
 ]
 
 
 def run_all_ablations(base_args):
     all_results = []
-    for name, ti, hi, cl in ABLATION_CONFIGS:
+    for name, ti, hi, cm in CNN_ABLATION_CONFIGS:
         args = deepcopy(base_args)
-        args.text_init = ti
-        args.hierarchy = hi
-        args.clap      = cl
+        args.text_init    = ti
+        args.hierarchy    = hi
+        args.cross_modal  = cm
+        args.backbone     = "cnn"
         cfg = build_config(args)
         results = run_experiment(cfg, name, base_args.device, base_args.emb_path)
         all_results.append(results)
 
     # Print ablation summary table
-    print("\n\nABLATION SUMMARY")
-    print(f"{'Run':<22} {'Text':>6} {'Hier':>6} {'CLAP':>6} "
+    print("\n\nABLATION SUMMARY (Table 1 — CNN)")
+    print(f"{'Run':<26} {'Text':>6} {'Hier':>10} {'CrossMod':>10} "
           f"{'mAP':>8} {'Genre':>8} {'Mood':>8} {'Cons':>8}")
-    print("─" * 78)
+    print("─" * 88)
     for r in all_results:
         c = r["config"]
         m = r["test_metrics"]
-        print(f"{r['run_name']:<22} {str(c['text_init']):>6} {str(c['hierarchy']):>6} "
-              f"{str(c['clap']):>6} "
+        print(f"{r['run_name']:<26} {str(c['text_init']):>6} {str(c['hierarchy']):>10} "
+              f"{c['cross_modal']:>10} "
               f"{m['mAP_all']:>8.4f} {m['mAP_genre']:>8.4f} "
               f"{m['mAP_mood']:>8.4f} {m['consistency_overall']:>8.4f}")
 
-    # Save summary
     with open("outputs/ablation_summary.json", "w") as f:
         json.dump(all_results, f, indent=2)
     print("\nSaved to outputs/ablation_summary.json")
 
 
+def run_ssl_experiments(base_args):
+    all_results = []
+    for name, bb, ti, hi, cm in SSL_CONFIGS:
+        args = deepcopy(base_args)
+        args.backbone     = bb
+        args.text_init    = ti
+        args.hierarchy    = hi
+        args.cross_modal  = cm
+        cfg = build_config(args)
+        results = run_experiment(cfg, name, base_args.device, base_args.emb_path)
+        all_results.append(results)
+
+    print("\n\nSSL BACKBONE SUMMARY (Table 2)")
+    print(f"{'Run':<28} {'BB':>6} {'Text':>6} {'Hier':>6} {'CrossMod':>10} "
+          f"{'mAP':>8} {'Genre':>8} {'Mood':>8}")
+    print("─" * 92)
+    for r in all_results:
+        c = r["config"]
+        m = r["test_metrics"]
+        print(f"{r['run_name']:<28} {c['backbone']:>6} {str(c['text_init']):>6} "
+              f"{str(c['hierarchy']):>6} {c['cross_modal']:>10} "
+              f"{m['mAP_all']:>8.4f} {m['mAP_genre']:>8.4f} "
+              f"{m['mAP_mood']:>8.4f}")
+
+    with open("outputs/ssl_summary.json", "w") as f:
+        json.dump(all_results, f, indent=2)
+    print("\nSaved to outputs/ssl_summary.json")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from typing import Dict
     args = parse_args()
 
     if args.run_all_ablations:
         run_all_ablations(args)
+    elif args.run_ssl_experiments:
+        run_ssl_experiments(args)
     else:
         cfg = build_config(args)
         run_name = args.run_name or (
-            f"ti{int(args.text_init)}_hi{int(args.hierarchy)}_cl{int(args.clap)}"
+            f"{cfg.backbone}_ti{int(cfg.use_text_init)}"
+            f"_hi{int(cfg.use_hierarchy)}_cm{cfg.cross_modal}"
         )
         run_experiment(cfg, run_name, args.device, args.emb_path)

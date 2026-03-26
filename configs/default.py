@@ -11,15 +11,17 @@ import torch
 @dataclass
 class HATGNNConfig:
     # ── Backbone ─────────────────────────────────────────────────────────────
-    backbone:       str   = "cnn"                # "cnn" | "mert"
-    mert_model_id:  str   = "m-a-p/MERT-v1-95M"
-    mert_max_nodes: int   = 512                  # MERT frame nodes after pooling
+    backbone:        str  = "cnn"                # "cnn" | "mert" | "muq"
+    mert_model_id:   str  = "m-a-p/MERT-v1-95M"
+    muq_model_id:    str  = "tencent-ailab/MuQ"
+    mert_max_nodes:  int  = 512                  # SSL frame nodes after pooling
 
     # ── Model dims ──────────────────────────────────────────────────────────
-    patch_dim:  int = 128      # CNN backbone output channels (or MERT proj dim)
-    label_dim:  int = 128      # label embedding dimension
-    clap_dim:   int = 512      # CLAP audio embedding dim (LAION-CLAP default)
-    max_nodes:  int = 2048     # max patch nodes — set automatically by build_config
+    patch_dim:       int = 128   # CNN backbone output channels (or SSL proj dim)
+    label_dim:       int = 128   # label embedding dimension
+    clap_dim:        int = 512   # CLAP audio embedding dim (LAION-CLAP default)
+    muqmulan_dim:    int = 512   # MuQ-MuLan audio embedding dim
+    max_nodes:       int = 2048  # max patch nodes — set automatically by build_config
 
     # ── Graph ───────────────────────────────────────────────────────────────
     k:      int = 9            # k-NN for PGN
@@ -54,13 +56,19 @@ class HATGNNConfig:
     win_ms:       int   = 25
     max_frames:   int   = 1024
 
+    # ── Cross-modal fusion ────────────────────────────────────────────────────
+    cross_modal:         str  = "none"                    # "clap"|"muqmulan"|"none"
+    muqmulan_model_id:   str  = "tencent-ailab/MuQ-MuLan"
+
     # ── Ablation switches ────────────────────────────────────────────────────
     use_text_init:  bool = True   # initialise label embs from text LM
     use_hierarchy:  bool = True   # use DAG-masked LLG
-    use_clap:       bool = True   # use CLAP cross-modal fusion
+    use_clap:       bool = False  # deprecated alias — use cross_modal="clap"
 
     # ── Paths ────────────────────────────────────────────────────────────────
     data_root:   str = "data/mtg_jamendo"
     output_dir:  str = "outputs"
-    clap_ckpt:   str = "laion/clap-htsat-fused"   # HuggingFace model id
-    text_lm_id:  str = "sentence-transformers/all-mpnet-base-v2"
+    clap_ckpt:          str = "laion/clap-htsat-fused"
+    text_lm_id:         str = "sentence-transformers/all-mpnet-base-v2"
+    cross_modal_emb_dir: str = ""   # dir of precomputed cross-modal .pt files
+                                    # (clap_embs/ or muqmulan_embs/ under data_root)
