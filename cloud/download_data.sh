@@ -1,17 +1,17 @@
 #!/bin/bash
 # cloud/download_data.sh
-# Downloads MTG-Jamendo to Lambda persistent storage and symlinks it into the repo.
+# Downloads MTG-Jamendo to persistent storage and symlinks it into the repo.
 #
 # MTG-Jamendo has 100 chunks (0-99), each ~3.2GB. Tracks are ordered by ID so
 # sequential chunks (e.g. 0-9) skew toward a narrow slice of the catalogue.
 # The default here downloads 20 evenly-spaced chunks (~64GB, ~100k tracks) to
 # get a representative genre/mood distribution across the full dataset.
 #
-# Lambda Storage mounts at a path you choose when creating it.
-# Set LAMBDA_STORAGE to that mount point before running.
+# RunPod: Network Volume mounts at /runpod-volume by default
+# Lambda Labs: use /home/ubuntu/storage
+# Override by setting STORAGE_ROOT in .env or environment.
 #
 # Usage:
-#   export LAMBDA_STORAGE=/home/ubuntu/storage   # set to your mount path
 #   bash cloud/download_data.sh                  # stratified 20 chunks (~64GB) [default]
 #   bash cloud/download_data.sh --small          # stratified 10 chunks (~32GB, quick test)
 #   bash cloud/download_data.sh --full           # all 100 chunks (~320GB, full dataset)
@@ -20,23 +20,28 @@
 
 set -e
 
+# Load .env if present
+if [ -f ".env" ]; then
+    set -a && source .env && set +a
+fi
+
 # ── Config ────────────────────────────────────────────────────────────────────
-LAMBDA_STORAGE=${LAMBDA_STORAGE:-/home/ubuntu/storage}
-DATASET_DIR="${LAMBDA_STORAGE}/mtg_jamendo"
+STORAGE_ROOT=${STORAGE_ROOT:-/runpod-volume}
+DATASET_DIR="${STORAGE_ROOT}/mtg_jamendo"
 REPO_DATA_LINK="data/mtg_jamendo"
 
 # ── Validate storage mount ────────────────────────────────────────────────────
-if [ ! -d "${LAMBDA_STORAGE}" ]; then
-    echo "ERROR: Lambda storage not found at ${LAMBDA_STORAGE}"
-    echo "  - Make sure you attached a persistent storage volume to this instance."
-    echo "  - Set LAMBDA_STORAGE to the correct mount path, e.g.:"
-    echo "      export LAMBDA_STORAGE=/home/ubuntu/storage"
+if [ ! -d "${STORAGE_ROOT}" ]; then
+    echo "ERROR: Persistent storage not found at ${STORAGE_ROOT}"
+    echo "  - RunPod: make sure you attached a Network Volume to this pod."
+    echo "  - Set STORAGE_ROOT in .env to the correct mount path, e.g.:"
+    echo "      STORAGE_ROOT=/runpod-volume"
     exit 1
 fi
 
 echo "============================================"
 echo "  MTG-Jamendo dataset download"
-echo "  Storage : ${LAMBDA_STORAGE}"
+echo "  Storage : ${STORAGE_ROOT}"
 echo "  Dataset : ${DATASET_DIR}"
 echo "============================================"
 
