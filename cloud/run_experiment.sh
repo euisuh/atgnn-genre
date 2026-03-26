@@ -7,15 +7,16 @@
 #   # All 6 CNN ablations (Table 1)
 #   bash cloud/run_experiment.sh --run_all_ablations --epochs 50
 #
-#   # Full H-ATGNN with CNN backbone
-#   bash cloud/run_experiment.sh --text_init --hierarchy --clap --run_name full_hatgnn
+#   # SSL experiments (Table 2: MERT + MuQ)
+#   bash cloud/run_experiment.sh --run_ssl_experiments --epochs 50
 #
-#   # Full H-ATGNN with MERT backbone (Table 2)
-#   bash cloud/run_experiment.sh --backbone mert --text_init --hierarchy --run_name hatgnn_mert
+#   # Auto-shutdown when done (instance powers off, billing stops)
+#   AUTO_SHUTDOWN=1 bash cloud/run_experiment.sh --run_all_ablations --epochs 50
 #
 #   # Lambda sweep
 #   for lam in 0.1 0.3 0.5 1.0; do
-#       bash cloud/run_experiment.sh --text_init --hierarchy --clap --lam $lam --run_name lam_$lam
+#       bash cloud/run_experiment.sh --text_init --hierarchy --cross_modal clap \
+#           --lam $lam --run_name lam_$lam
 #   done
 
 set -e
@@ -40,6 +41,7 @@ OUTPUTS_DIR="${LAMBDA_STORAGE}/outputs"
 WANDB_PROJECT=${WANDB_PROJECT:-""}
 WANDB_ENTITY=${WANDB_ENTITY:-""}
 WANDB_TAGS=${WANDB_TAGS:-"cloud,lambda"}
+AUTO_SHUTDOWN=${AUTO_SHUTDOWN:-0}
 
 # Build W&B flags — only added to train.py if WANDB_PROJECT is set
 WANDB_FLAGS=""
@@ -110,3 +112,22 @@ python train.py \
     --emb_path "${EMB_PATH}" \
     ${WANDB_FLAGS} \
     "$@"
+TRAIN_EXIT=$?
+
+# ── Auto-shutdown ─────────────────────────────────────────────────────────────
+# Runs only if AUTO_SHUTDOWN=1 is set.
+# On Lambda Labs, powering off terminates the instance and stops billing.
+# Checkpoints are already uploaded to W&B artifacts before this point.
+if [ "${AUTO_SHUTDOWN}" = "1" ]; then
+    if [ ${TRAIN_EXIT} -ne 0 ]; then
+        echo ""
+        echo "WARNING: training exited with code ${TRAIN_EXIT}."
+        echo "Skipping auto-shutdown — review logs before closing the instance."
+    else
+        echo ""
+        echo "Training complete. Shutting down in 60 seconds..."
+        echo "Press Ctrl+C to cancel."
+        sleep 60
+        sudo shutdown -h now
+    fi
+fi

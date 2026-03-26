@@ -181,6 +181,21 @@ def _wandb_summary_table(run, all_results: list, table_name: str):
     wandb.log({table_name: table})
 
 
+def _wandb_upload_checkpoint(run, ckpt_path: str, run_name: str):
+    """Upload best.pt as a W&B artifact so it survives instance shutdown."""
+    if run is None or not os.path.exists(ckpt_path):
+        return
+    import wandb
+    artifact = wandb.Artifact(
+        name=f"{run_name}-checkpoint",
+        type="model",
+        description=f"Best validation checkpoint for run {run_name}",
+    )
+    artifact.add_file(ckpt_path, name="best.pt")
+    run.log_artifact(artifact)
+    print(f"  Checkpoint uploaded to W&B artifacts: {run_name}-checkpoint")
+
+
 def _wandb_finish(run):
     if run is not None:
         import wandb
@@ -451,8 +466,9 @@ def run_experiment(cfg, run_name: str, device: str,
     test_metrics = evaluate_epoch(model, test_loader, device, cfg)
     print_results(test_metrics, prefix=f"TEST — {run_name}")
 
-    # ── W&B test summary ──
+    # ── W&B test summary + checkpoint upload ──
     _wandb_log_test(wb_run, test_metrics, best_map)
+    _wandb_upload_checkpoint(wb_run, best_ckpt, run_name)
 
     # ── Save results ──
     results = {
