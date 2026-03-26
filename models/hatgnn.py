@@ -294,7 +294,8 @@ class SSLBackbone(nn.Module):
     def _unfreeze_last_layers(self, n=2):
         """Try common attribute paths to find transformer layers."""
         for attr_path in ["encoder.layers", "layers", "transformer.layers",
-                          "model.layers", "model.encoder.layers"]:
+                          "model.layers", "model.encoder.layers",
+                          "model.conformer.layers"]:
             obj = self.model
             try:
                 for part in attr_path.split("."):
