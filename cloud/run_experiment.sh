@@ -30,6 +30,13 @@ LAMBDA_STORAGE=${LAMBDA_STORAGE:-/home/ubuntu/storage}
 DATASET_DIR="${LAMBDA_STORAGE}/mtg_jamendo"
 EMB_DIR="${LAMBDA_STORAGE}/embeddings"
 OUTPUTS_DIR="${LAMBDA_STORAGE}/outputs"
+HF_CACHE_DIR="${LAMBDA_STORAGE}/hf_cache"
+
+# Store HuggingFace model weights on persistent storage so they survive
+# instance shutdown and don't need to be re-downloaded next time
+mkdir -p "${HF_CACHE_DIR}"
+export HF_HOME="${HF_CACHE_DIR}"
+export TRANSFORMERS_CACHE="${HF_CACHE_DIR}"
 
 # ── W&B config ────────────────────────────────────────────────────────────────
 # Set WANDB_API_KEY before running, e.g.:
