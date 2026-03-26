@@ -20,6 +20,11 @@
 
 set -e
 
+# Load .env if present (API keys — not committed to git)
+if [ -f ".env" ]; then
+    set -a && source .env && set +a
+fi
+
 LAMBDA_STORAGE=${LAMBDA_STORAGE:-/home/ubuntu/storage}
 DATASET_DIR="${LAMBDA_STORAGE}/mtg_jamendo"
 EMB_DIR="${LAMBDA_STORAGE}/embeddings"
