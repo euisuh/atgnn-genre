@@ -41,15 +41,14 @@ from tqdm import tqdm
 
 
 _MODEL_SR = {
-    "tencent-ailab/MuQ-MuLan": 24000,
-    "tencent-ailab/MuQ-MuLan-large": 24000,
+    "OpenMuQ/MuQ-MuLan-large": 24000,
 }
 
 
 def load_muqmulan(model_id: str, device: str):
-    from transformers import AutoModel
+    from muq import MuQMuLan
     print(f"Loading MuQ-MuLan: {model_id}")
-    model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+    model = MuQMuLan.from_pretrained(model_id)
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad = False
@@ -63,18 +62,7 @@ def embed_batch(model, waveforms: torch.Tensor, device: str):
     returns   : (B, D) cpu tensor
     """
     waveforms = waveforms.to(device)
-    out = model(input_values=waveforms)
-
-    if hasattr(out, "audio_embeds"):
-        emb = out.audio_embeds
-    elif hasattr(out, "pooler_output"):
-        emb = out.pooler_output
-    elif hasattr(out, "last_hidden_state"):
-        emb = out.last_hidden_state.mean(dim=1)
-    else:
-        raise ValueError(
-            f"Cannot extract audio embedding from model output: {list(vars(out).keys())}"
-        )
+    emb = model(wavs=waveforms)   # MuQMuLan returns audio embeddings directly
     return emb.cpu()
 
 
@@ -113,7 +101,7 @@ def get_output_path(audio_path: str, data_root: str) -> str:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_root",  default="data/mtg_jamendo")
-    p.add_argument("--model",      default="tencent-ailab/MuQ-MuLan")
+    p.add_argument("--model",      default="OpenMuQ/MuQ-MuLan-large")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--device",
                    default="cuda" if torch.cuda.is_available() else "cpu")
