@@ -26,6 +26,9 @@ build/
 # OS
 .DS_Store
 
+# Secrets
+.env
+
 # Logs
 *.log
 wandb/
