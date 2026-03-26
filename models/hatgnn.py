@@ -239,21 +239,26 @@ class CNNBackbone(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# MERT Backbone (music-specific self-supervised model)
+# Generalised SSL Backbone (MERT, MuQ, or any HF audio transformer)
 # ---------------------------------------------------------------------------
 
-class MERTBackbone(nn.Module):
-    """
-    MERT backbone for music understanding.
-    Uses m-a-p/MERT-v1-95M — a music-specific self-supervised model trained
-    on large-scale music audio with masked modelling objectives.
+# Expected sample rates per model family
+_SSL_MODEL_SR = {
+    "m-a-p/MERT-v1-95M": 24000,
+    "m-a-p/MERT-v1-330M": 24000,
+    "tencent-ailab/MuQ": 24000,
+    "tencent-ailab/MuQ-large": 24000,
+}
 
-    Outputs (B, out_dim, 1, max_nodes) to be drop-in compatible with CNN path.
-    Last 2 transformer layers are unfrozen for fine-tuning; rest are frozen.
-    """
 
-    MERT_SR    = 24000   # MERT expects 24 kHz audio
-    FRAME_SHIFT = 320    # samples per output frame at 24 kHz
+class SSLBackbone(nn.Module):
+    """
+    Generalized SSL backbone supporting MERT, MuQ, and any HF audio model
+    with standard AutoModel interface (last_hidden_state output).
+
+    Outputs (B, out_dim, 1, max_nodes) — drop-in compatible with CNN path.
+    Last 2 transformer blocks are unfrozen for fine-tuning; rest frozen.
+    """
 
     def __init__(self, model_id="m-a-p/MERT-v1-95M", out_dim=128,
                  max_nodes=512, input_sr=16000):
@@ -262,19 +267,35 @@ class MERTBackbone(nn.Module):
 
         self.input_sr  = input_sr
         self.max_nodes = max_nodes
+        self.model_sr  = _SSL_MODEL_SR.get(model_id, 24000)
 
-        print(f"  Loading MERT backbone: {model_id}")
-        self.mert = AutoModel.from_pretrained(model_id, trust_remote_code=True)
-        hidden_dim = self.mert.config.hidden_size   # 768 for MERT-v1-95M
+        print(f"  Loading SSL backbone: {model_id}")
+        self.model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+        hidden_dim = self.model.config.hidden_size
 
-        # Freeze all layers, unfreeze last 2 transformer blocks for fine-tuning
-        for p in self.mert.parameters():
+        # Freeze all, then unfreeze last 2 transformer blocks
+        for p in self.model.parameters():
             p.requires_grad = False
-        for layer in self.mert.encoder.layers[-2:]:
-            for p in layer.parameters():
-                p.requires_grad = True
+        self._unfreeze_last_layers(n=2)
 
         self.proj = nn.Linear(hidden_dim, out_dim)
+
+    def _unfreeze_last_layers(self, n=2):
+        """Try common attribute paths to find transformer layers."""
+        for attr_path in ["encoder.layers", "layers", "transformer.layers",
+                          "model.layers", "model.encoder.layers"]:
+            obj = self.model
+            try:
+                for part in attr_path.split("."):
+                    obj = getattr(obj, part)
+                for layer in obj[-n:]:
+                    for p in layer.parameters():
+                        p.requires_grad = True
+                print(f"  Unfroze last {n} layers via '{attr_path}'")
+                return
+            except AttributeError:
+                continue
+        print("  WARNING: could not locate transformer layers; backbone fully frozen")
 
     def forward(self, waveform):
         """
@@ -283,20 +304,90 @@ class MERTBackbone(nn.Module):
         """
         x = waveform.squeeze(1)   # (B, T)
 
-        # Resample to MERT's expected sample rate
-        if self.input_sr != self.MERT_SR:
-            x = torchaudio.functional.resample(x, self.input_sr, self.MERT_SR)
+        if self.input_sr != self.model_sr:
+            x = torchaudio.functional.resample(x, self.input_sr, self.model_sr)
 
-        out   = self.mert(x, output_hidden_states=False)
-        feats = out.last_hidden_state          # (B, T_frames, hidden_dim)
+        out = self.model(x, output_hidden_states=False)
+
+        # Handle models with different output attribute names
+        if hasattr(out, "last_hidden_state"):
+            feats = out.last_hidden_state          # (B, T_frames, hidden_dim)
+        elif hasattr(out, "hidden_states"):
+            feats = out.hidden_states[-1]
+        else:
+            raise ValueError(
+                f"Cannot extract features from {type(self.model).__name__} output. "
+                "Expected 'last_hidden_state' or 'hidden_states'."
+            )
+
         feats = self.proj(feats)               # (B, T_frames, out_dim)
-
-        # Pool time dimension to max_nodes
-        feats = feats.permute(0, 2, 1)        # (B, out_dim, T_frames)
+        feats = feats.permute(0, 2, 1)         # (B, out_dim, T_frames)
         feats = F.adaptive_avg_pool1d(feats, self.max_nodes)
-        feats = feats.unsqueeze(2)            # (B, out_dim, 1, max_nodes)
+        feats = feats.unsqueeze(2)             # (B, out_dim, 1, max_nodes)
 
         return feats
+
+
+# ---------------------------------------------------------------------------
+# MuQ-MuLan cross-modal embedder (on-the-fly, replaces precomputed CLAP)
+# ---------------------------------------------------------------------------
+
+class MuQLanEmbedder(nn.Module):
+    """
+    On-the-fly audio embedding using MuQ-MuLan (music-language alignment model).
+    Drop-in replacement for precomputed CLAP embeddings in GatedFusion.
+
+    Fully frozen — used as a feature extractor only.
+    Output is projected to out_dim to match the GatedFusion interface.
+    """
+
+    def __init__(self, model_id="tencent-ailab/MuQ-MuLan", out_dim=512,
+                 input_sr=16000):
+        super().__init__()
+        from transformers import AutoModel
+
+        self.input_sr = input_sr
+        self.model_sr = _SSL_MODEL_SR.get(model_id, 24000)
+
+        print(f"  Loading MuQ-MuLan embedder: {model_id}")
+        self.model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+
+        # Fully frozen — cross-modal embedder is not fine-tuned
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+        # Determine audio encoder output dim and project to out_dim
+        cfg = self.model.config
+        audio_dim = getattr(cfg, "projection_dim",
+                    getattr(cfg, "hidden_size", 512))
+        self.proj = nn.Linear(audio_dim, out_dim)
+
+    @torch.no_grad()
+    def _encode_audio(self, x):
+        """x: (B, T) at self.model_sr -> (B, audio_dim)"""
+        out = self.model(input_values=x)
+        # Try standard output attribute names
+        if hasattr(out, "audio_embeds"):
+            return out.audio_embeds
+        if hasattr(out, "pooler_output"):
+            return out.pooler_output
+        if hasattr(out, "last_hidden_state"):
+            return out.last_hidden_state.mean(dim=1)
+        raise ValueError(
+            f"Cannot extract audio embedding from {type(self.model).__name__}. "
+            "Expected 'audio_embeds', 'pooler_output', or 'last_hidden_state'."
+        )
+
+    def forward(self, waveform):
+        """
+        waveform : (B, 1, T)  raw audio at self.input_sr
+        returns  : (B, out_dim)
+        """
+        x = waveform.squeeze(1)
+        if self.input_sr != self.model_sr:
+            x = torchaudio.functional.resample(x, self.input_sr, self.model_sr)
+        emb = self._encode_audio(x)       # (B, audio_dim)
+        return self.proj(emb)             # (B, out_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -313,9 +404,10 @@ class HATGNN(nn.Module):
 
         # --- Backbone ---
         self.backbone_type = cfg.backbone
-        if cfg.backbone == "mert":
-            self.backbone = MERTBackbone(
-                model_id=cfg.mert_model_id,
+        if cfg.backbone in ("mert", "muq"):
+            model_id = cfg.muq_model_id if cfg.backbone == "muq" else cfg.mert_model_id
+            self.backbone = SSLBackbone(
+                model_id=model_id,
                 out_dim=pd,
                 max_nodes=cfg.max_nodes,
                 input_sr=cfg.sample_rate,
@@ -336,7 +428,18 @@ class HATGNN(nn.Module):
         self.subgenre_emb = nn.Embedding(cfg.n_subgenre, d)
 
         # --- Cross-modal fusion ---
-        self.fusion = GatedFusion(pd, cfg.clap_dim, pd)
+        self.cross_modal = cfg.cross_modal   # "clap" | "muqmulan" | "none"
+        if cfg.cross_modal == "muqmulan":
+            self.muqlan = MuQLanEmbedder(
+                model_id=cfg.muqmulan_model_id,
+                out_dim=cfg.muqmulan_dim,
+                input_sr=cfg.sample_rate,
+            )
+            self.fusion = GatedFusion(pd, cfg.muqmulan_dim, pd)
+        elif cfg.cross_modal == "clap":
+            self.fusion = GatedFusion(pd, cfg.clap_dim, pd)
+        else:
+            self.fusion = None
 
         # --- Patch->label projection (align dims if needed) ---
         self.patch_proj = nn.Linear(pd, d) if pd != d else nn.Identity()
@@ -390,16 +493,16 @@ class HATGNN(nn.Module):
             self.genre_emb.weight.copy_(_proj(genre_vecs))
             self.subgenre_emb.weight.copy_(_proj(sub_vecs))
 
-    def forward(self, spec, clap_emb=None, waveform=None):
+    def forward(self, spec, cross_modal_emb=None, waveform=None):
         """
-        spec     : (B, 1, F, T)   log-mel spectrogram  (used by CNN backbone)
-        clap_emb : (B, clap_dim)  optional CLAP audio embedding
-        waveform : (B, 1, T)      raw audio             (used by MERT backbone)
+        spec             : (B, 1, F, T)   log-mel spectrogram  (CNN backbone)
+        cross_modal_emb  : (B, emb_dim)   precomputed CLAP embedding (optional)
+        waveform         : (B, 1, T)      raw audio  (SSL backbone + MuQ-MuLan)
         """
         B = spec.size(0)
 
         # --- Backbone -> patch nodes ---
-        if self.backbone_type == "mert":
+        if self.backbone_type in ("mert", "muq"):
             feat = self.backbone(waveform)               # (B, pd, 1, N)
         else:
             feat = self.backbone(spec)                   # (B, pd, H, W)
@@ -420,9 +523,11 @@ class HATGNN(nn.Module):
         # --- Global patch representation for heads ---
         patch_global = patch_feats.mean(dim=1)           # (B, pd)
 
-        # --- CLAP fusion ---
-        if clap_emb is not None:
-            patch_global = self.fusion(patch_global, clap_emb)
+        # --- Cross-modal fusion ---
+        if self.cross_modal == "muqmulan" and waveform is not None:
+            cross_modal_emb = self.muqlan(waveform)       # computed on-the-fly
+        if cross_modal_emb is not None and self.fusion is not None:
+            patch_global = self.fusion(patch_global, cross_modal_emb)
 
         # --- Patch logits ---
         y_patch = self.patch_head(patch_feats.permute(0, 2, 1))  # (B, n_labels)
