@@ -44,7 +44,7 @@ pip install sentence-transformers transformers
 
 # ── General deps ──────────────────────────────────────────────────────────────
 echo "[4/4] Installing general deps"
-pip install scikit-learn numpy tqdm
+pip install scikit-learn numpy tqdm wandb muq
 
 echo ""
 echo "  Setup complete. Run: python scripts/verify_setup.py"

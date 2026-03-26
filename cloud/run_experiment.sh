@@ -25,9 +25,29 @@ DATASET_DIR="${LAMBDA_STORAGE}/mtg_jamendo"
 EMB_DIR="${LAMBDA_STORAGE}/embeddings"
 OUTPUTS_DIR="${LAMBDA_STORAGE}/outputs"
 
+# ── W&B config ────────────────────────────────────────────────────────────────
+# Set WANDB_API_KEY before running, e.g.:
+#   export WANDB_API_KEY=your_key_here
+#   bash cloud/run_experiment.sh --run_all_ablations ...
+#
+# Or pass project/entity directly:
+#   WANDB_PROJECT=hatgnn WANDB_ENTITY=your_entity bash cloud/run_experiment.sh ...
+WANDB_PROJECT=${WANDB_PROJECT:-""}
+WANDB_ENTITY=${WANDB_ENTITY:-""}
+WANDB_TAGS=${WANDB_TAGS:-"cloud,lambda"}
+
+# Build W&B flags — only added to train.py if WANDB_PROJECT is set
+WANDB_FLAGS=""
+if [ -n "${WANDB_PROJECT}" ]; then
+    WANDB_FLAGS="--wandb_project ${WANDB_PROJECT}"
+    [ -n "${WANDB_ENTITY}" ] && WANDB_FLAGS="${WANDB_FLAGS} --wandb_entity ${WANDB_ENTITY}"
+    [ -n "${WANDB_TAGS}" ]   && WANDB_FLAGS="${WANDB_FLAGS} --wandb_tags ${WANDB_TAGS}"
+fi
+
 echo "============================================"
 echo "  H-ATGNN experiment launcher"
 echo "  Storage  : ${LAMBDA_STORAGE}"
+echo "  W&B      : ${WANDB_PROJECT:-disabled}"
 echo "  Args     : $@"
 echo "============================================"
 
@@ -63,6 +83,19 @@ echo "[3/3] Environment check ..."
 python scripts/verify_setup.py --data_root "${DATASET_DIR}"
 echo ""
 
+# ── W&B auth check ────────────────────────────────────────────────────────────
+if [ -n "${WANDB_PROJECT}" ]; then
+    if [ -z "${WANDB_API_KEY}" ]; then
+        echo "WARNING: WANDB_PROJECT is set but WANDB_API_KEY is not."
+        echo "         Set it with: export WANDB_API_KEY=your_key_here"
+        echo "         Continuing without W&B logging."
+        WANDB_FLAGS=""
+    else
+        echo "W&B auth  : key found, logging to project '${WANDB_PROJECT}'"
+        python -c "import wandb; wandb.login()" 2>/dev/null && echo "W&B login : OK" || echo "W&B login : FAILED (continuing anyway)"
+    fi
+fi
+
 # ── Train ─────────────────────────────────────────────────────────────────────
 echo "Starting training ..."
 echo ""
@@ -70,4 +103,5 @@ python train.py \
     --data_root "${DATASET_DIR}" \
     --output_dir "${OUTPUTS_DIR}" \
     --emb_path "${EMB_PATH}" \
+    ${WANDB_FLAGS} \
     "$@"
