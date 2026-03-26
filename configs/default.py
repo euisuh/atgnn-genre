@@ -13,7 +13,7 @@ class HATGNNConfig:
     # ── Backbone ─────────────────────────────────────────────────────────────
     backbone:        str  = "cnn"                # "cnn" | "mert" | "muq"
     mert_model_id:   str  = "m-a-p/MERT-v1-95M"
-    muq_model_id:    str  = "tencent-ailab/MuQ"
+    muq_model_id:    str  = "OpenMuQ/MuQ-large-msd-iter"
     mert_max_nodes:  int  = 512                  # SSL frame nodes after pooling
 
     # ── Model dims ──────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ class HATGNNConfig:
 
     # ── Cross-modal fusion ────────────────────────────────────────────────────
     cross_modal:         str  = "none"                    # "clap"|"muqmulan"|"none"
-    muqmulan_model_id:   str  = "tencent-ailab/MuQ-MuLan"
+    muqmulan_model_id:   str  = "OpenMuQ/MuQ-MuLan-large"
 
     # ── Ablation switches ────────────────────────────────────────────────────
     use_text_init:  bool = True   # initialise label embs from text LM

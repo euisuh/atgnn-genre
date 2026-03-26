@@ -242,19 +242,22 @@ class CNNBackbone(nn.Module):
 # Generalised SSL Backbone (MERT, MuQ, or any HF audio transformer)
 # ---------------------------------------------------------------------------
 
-# Expected sample rates per model family
+# Expected sample rates — all current SSL models use 24 kHz
 _SSL_MODEL_SR = {
-    "m-a-p/MERT-v1-95M": 24000,
-    "m-a-p/MERT-v1-330M": 24000,
-    "tencent-ailab/MuQ": 24000,
-    "tencent-ailab/MuQ-large": 24000,
+    "m-a-p/MERT-v1-95M":          24000,
+    "m-a-p/MERT-v1-330M":         24000,
+    "OpenMuQ/MuQ-large-msd-iter":  24000,
+    "OpenMuQ/MuQ-MuLan-large":     24000,
 }
+
+def _is_muq_model(model_id: str) -> bool:
+    return model_id.startswith("OpenMuQ/MuQ")
 
 
 class SSLBackbone(nn.Module):
     """
-    Generalized SSL backbone supporting MERT, MuQ, and any HF audio model
-    with standard AutoModel interface (last_hidden_state output).
+    Generalized SSL backbone supporting MERT (via transformers AutoModel)
+    and MuQ (via the muq package).
 
     Outputs (B, out_dim, 1, max_nodes) — drop-in compatible with CNN path.
     Last 2 transformer blocks are unfrozen for fine-tuning; rest frozen.
@@ -263,15 +266,23 @@ class SSLBackbone(nn.Module):
     def __init__(self, model_id="m-a-p/MERT-v1-95M", out_dim=128,
                  max_nodes=512, input_sr=16000):
         super().__init__()
-        from transformers import AutoModel
-
-        self.input_sr  = input_sr
-        self.max_nodes = max_nodes
-        self.model_sr  = _SSL_MODEL_SR.get(model_id, 24000)
+        self.input_sr   = input_sr
+        self.max_nodes  = max_nodes
+        self.model_sr   = _SSL_MODEL_SR.get(model_id, 24000)
+        self._muq_api   = _is_muq_model(model_id)
 
         print(f"  Loading SSL backbone: {model_id}")
-        self.model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
-        hidden_dim = self.model.config.hidden_size
+
+        if self._muq_api:
+            from muq import MuQ
+            self.model = MuQ.from_pretrained(model_id)
+            # MuQ-large hidden dim is 1024; read from config if available
+            hidden_dim = getattr(self.model.config, "hidden_size",
+                         getattr(self.model.config, "encoder_hidden_size", 1024))
+        else:
+            from transformers import AutoModel
+            self.model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+            hidden_dim = self.model.config.hidden_size
 
         # Freeze all, then unfreeze last 2 transformer blocks
         for p in self.model.parameters():
@@ -307,18 +318,20 @@ class SSLBackbone(nn.Module):
         if self.input_sr != self.model_sr:
             x = torchaudio.functional.resample(x, self.input_sr, self.model_sr)
 
-        out = self.model(x, output_hidden_states=False)
-
-        # Handle models with different output attribute names
-        if hasattr(out, "last_hidden_state"):
-            feats = out.last_hidden_state          # (B, T_frames, hidden_dim)
-        elif hasattr(out, "hidden_states"):
-            feats = out.hidden_states[-1]
+        if self._muq_api:
+            # muq package: output_hidden_states=True returns all layer hidden states
+            out   = self.model(x, output_hidden_states=True)
+            feats = out.hidden_states[-1]          # (B, T_frames, hidden_dim)
         else:
-            raise ValueError(
-                f"Cannot extract features from {type(self.model).__name__} output. "
-                "Expected 'last_hidden_state' or 'hidden_states'."
-            )
+            out = self.model(x, output_hidden_states=False)
+            if hasattr(out, "last_hidden_state"):
+                feats = out.last_hidden_state
+            elif hasattr(out, "hidden_states"):
+                feats = out.hidden_states[-1]
+            else:
+                raise ValueError(
+                    f"Cannot extract features from {type(self.model).__name__} output."
+                )
 
         feats = self.proj(feats)               # (B, T_frames, out_dim)
         feats = feats.permute(0, 2, 1)         # (B, out_dim, T_frames)
@@ -334,49 +347,32 @@ class SSLBackbone(nn.Module):
 
 class MuQLanEmbedder(nn.Module):
     """
-    On-the-fly audio embedding using MuQ-MuLan (music-language alignment model).
+    On-the-fly audio embedding using MuQ-MuLan (music-language alignment).
     Drop-in replacement for precomputed CLAP embeddings in GatedFusion.
 
     Fully frozen — used as a feature extractor only.
     Output is projected to out_dim to match the GatedFusion interface.
     """
 
-    def __init__(self, model_id="tencent-ailab/MuQ-MuLan", out_dim=512,
+    def __init__(self, model_id="OpenMuQ/MuQ-MuLan-large", out_dim=512,
                  input_sr=16000):
         super().__init__()
-        from transformers import AutoModel
-
         self.input_sr = input_sr
         self.model_sr = _SSL_MODEL_SR.get(model_id, 24000)
 
         print(f"  Loading MuQ-MuLan embedder: {model_id}")
-        self.model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+        from muq import MuQMuLan
+        self.model = MuQMuLan.from_pretrained(model_id)
 
         # Fully frozen — cross-modal embedder is not fine-tuned
         for p in self.model.parameters():
             p.requires_grad = False
 
-        # Determine audio encoder output dim and project to out_dim
-        cfg = self.model.config
-        audio_dim = getattr(cfg, "projection_dim",
-                    getattr(cfg, "hidden_size", 512))
+        # MuQ-MuLan outputs a projected embedding; get its dim
+        # Default projection dim for MuQ-MuLan-large is 512
+        audio_dim = getattr(self.model.config, "projection_dim",
+                    getattr(self.model.config, "embed_dim", 512))
         self.proj = nn.Linear(audio_dim, out_dim)
-
-    @torch.no_grad()
-    def _encode_audio(self, x):
-        """x: (B, T) at self.model_sr -> (B, audio_dim)"""
-        out = self.model(input_values=x)
-        # Try standard output attribute names
-        if hasattr(out, "audio_embeds"):
-            return out.audio_embeds
-        if hasattr(out, "pooler_output"):
-            return out.pooler_output
-        if hasattr(out, "last_hidden_state"):
-            return out.last_hidden_state.mean(dim=1)
-        raise ValueError(
-            f"Cannot extract audio embedding from {type(self.model).__name__}. "
-            "Expected 'audio_embeds', 'pooler_output', or 'last_hidden_state'."
-        )
 
     def forward(self, waveform):
         """
@@ -386,8 +382,11 @@ class MuQLanEmbedder(nn.Module):
         x = waveform.squeeze(1)
         if self.input_sr != self.model_sr:
             x = torchaudio.functional.resample(x, self.input_sr, self.model_sr)
-        emb = self._encode_audio(x)       # (B, audio_dim)
-        return self.proj(emb)             # (B, out_dim)
+
+        with torch.no_grad():
+            emb = self.model(wavs=x)   # (B, audio_dim)
+
+        return self.proj(emb)          # (B, out_dim)
 
 
 # ---------------------------------------------------------------------------
