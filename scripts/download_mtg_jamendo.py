@@ -102,10 +102,10 @@ def extract_tar(tar_path: str, dest_dir: str):
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(f"  ERROR extracting: {result.stderr}")
+        print(f"  WARNING: tar exited {result.returncode}: {result.stderr}")
     else:
         print(f"  Extracted to {dest_dir}")
-        os.remove(tar_path)   # save disk space after extraction
+    os.remove(tar_path)   # always remove tar to save disk space
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
