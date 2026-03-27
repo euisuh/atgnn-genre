@@ -98,7 +98,7 @@ def extract_tar(tar_path: str, dest_dir: str):
     print(f"  Extracting {os.path.basename(tar_path)} ...")
     os.makedirs(dest_dir, exist_ok=True)
     result = subprocess.run(
-        ["tar", "-xf", tar_path, "-C", dest_dir],
+        ["tar", "-xf", tar_path, "-C", dest_dir, "--no-same-owner"],
         capture_output=True, text=True
     )
     if result.returncode != 0:
