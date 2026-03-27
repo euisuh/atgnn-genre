@@ -28,6 +28,7 @@ build/
 
 # Secrets
 .env
+CLAUDE.md
 
 # Logs
 *.log
