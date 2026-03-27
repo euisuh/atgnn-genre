@@ -187,6 +187,10 @@ def download_audio(output_dir: str, chunks: list):
     os.makedirs(audio_dir, exist_ok=True)
 
     for chunk in chunks:
+        chunk_dir = os.path.join(audio_dir, f"{chunk:02d}")
+        if os.path.isdir(chunk_dir) and os.listdir(chunk_dir):
+            print(f"  [skip] audio chunk {chunk:02d} already extracted")
+            continue
         url      = AUDIO_CHUNK_URL.format(chunk=chunk)
         tar_path = os.path.join(output_dir, f"audio_chunk_{chunk:02d}.tar")
         try:
