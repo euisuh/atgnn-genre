@@ -29,7 +29,7 @@ fi
 # RunPod: persistent Network Volume mounts at /runpod-volume by default
 # Lambda Labs: use /home/ubuntu/storage
 # Override by setting STORAGE_ROOT in .env or environment
-STORAGE_ROOT=${STORAGE_ROOT:-/runpod-volume}
+STORAGE_ROOT=${STORAGE_ROOT:-/workspace}
 DATASET_DIR="${STORAGE_ROOT}/mtg_jamendo"
 EMB_DIR="${STORAGE_ROOT}/embeddings"
 OUTPUTS_DIR="${STORAGE_ROOT}/outputs"
