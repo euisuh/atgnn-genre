@@ -184,7 +184,12 @@ class MTGJamendoDataset(Dataset):
         track_id   = row["track_id"]
         audio_path = os.path.join(self.root, "audio", row["path"])
 
-        waveform = self._load_audio(audio_path)
+        try:
+            waveform = self._load_audio(audio_path)
+        except Exception:
+            # Corrupt or missing file — return a silent waveform
+            max_samples = self.max_frames * self.hop_len
+            waveform = torch.zeros(1, max_samples)
         spec     = self._to_logmel(waveform)          # (1, F, T)
 
         if self.augment:
