@@ -220,6 +220,8 @@ def parse_args():
     p.add_argument("--run_name",   type=str,   default=None)
     p.add_argument("--data_root",  type=str,   default="data/mtg_jamendo")
     p.add_argument("--output_dir", type=str,   default="outputs")
+    p.add_argument("--resume",     type=str,   default=None,
+                   help="Path to last.pt to resume training from")
     p.add_argument("--emb_path",   type=str,   default="embeddings/label_embs.pt",
                    help="Path to precomputed text LM embeddings")
     p.add_argument("--backbone",   type=str,   default="cnn",
@@ -278,6 +280,8 @@ def build_config(args) -> HATGNNConfig:
         max_nodes=max_nodes,
         **h,
     )
+    # Attach resume path (not a dataclass field, just a dynamic attr)
+    cfg.resume = getattr(args, "resume", None)
     return cfg
 
 
@@ -421,12 +425,29 @@ def run_experiment(cfg, run_name: str, device: str,
     total_steps = len(train_loader) * cfg.epochs
     scheduler   = get_lr_scheduler(optimizer, cfg.lr_warmup, total_steps)
 
-    # ── Training ──
-    best_map  = 0.0
+    # ── Checkpoint paths ──
     best_ckpt = os.path.join(run_dir, "best.pt")
-    history   = []
+    last_ckpt = os.path.join(run_dir, "last.pt")
 
-    for epoch in range(1, cfg.epochs + 1):
+    # ── Resume from checkpoint ──
+    start_epoch = 1
+    best_map    = 0.0
+    history     = []
+
+    resume_path = getattr(cfg, "resume", None)
+    if resume_path and os.path.exists(resume_path):
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        start_epoch = ckpt["epoch"] + 1
+        best_map    = ckpt.get("best_map", 0.0)
+        history     = ckpt.get("history", [])
+        print(f"  Resumed from {resume_path} (epoch {ckpt['epoch']}, best_mAP={best_map:.4f})")
+    elif resume_path:
+        print(f"  WARNING: --resume path not found: {resume_path}. Starting fresh.")
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
         t0 = time.time()
 
         train_loss, grad_norm = train_one_epoch(
@@ -460,6 +481,16 @@ def run_experiment(cfg, run_name: str, device: str,
         if val_metrics["mAP_all"] > best_map:
             best_map = val_metrics["mAP_all"]
             torch.save(model.state_dict(), best_ckpt)
+
+        # Save last checkpoint every epoch (enables resume)
+        torch.save({
+            "epoch":     epoch,
+            "model":     model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "best_map":  best_map,
+            "history":   history,
+        }, last_ckpt)
 
     # ── Test evaluation ──
     model.load_state_dict(torch.load(best_ckpt, map_location=device))
