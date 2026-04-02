@@ -32,15 +32,11 @@ class MaxRelativeGraphConv(nn.Module):
         edge_index : (2, E)  [src, dst] pairs
         """
         src, dst = edge_index
-        # For each dst node, gather all src neighbours and take max of (src - dst)
         diff = x[src] - x[dst]                          # (E, C)
-        # Scatter max over each destination node
         max_diff = torch.zeros_like(x)
-        # manual scatter_max (avoids torch_scatter dependency)
-        for i in range(x.size(0)):
-            mask = dst == i
-            if mask.any():
-                max_diff[i] = diff[mask].max(dim=0).values
+        if diff.numel() > 0:
+            idx = dst.unsqueeze(-1).expand_as(diff)
+            max_diff.scatter_reduce_(0, idx, diff, reduce='amax', include_self=True)
 
         x_cat = torch.cat([x, max_diff], dim=-1)        # (N, 2C)
         return self.W_update(x_cat)                      # (N, out_dim)
@@ -64,22 +60,20 @@ class PGNBlock(nn.Module):
             nn.Linear(dim * ffn_ratio, dim),
         )
 
-    def build_knn_graph(self, x):
-        # x: (N, C) — build k-NN graph in feature space
-        # torch_geometric knn_graph expects (N, C) and returns edge_index (2, E)
+    def build_knn_graph(self, x, batch=None):
+        # x: (N, C) or (B*N, C) — build k-NN graph in feature space
         edge_index = knn_graph(x.detach(), k=self.k * self.dilation,
-                               loop=False, flow='target_to_source')
+                               batch=batch, loop=False, flow='target_to_source')
         if self.dilation > 1:
-            # keep only every d-th neighbour (dilated aggregation)
             src, dst = edge_index
             keep = torch.arange(0, edge_index.size(1), self.dilation,
                                 device=x.device)
             edge_index = edge_index[:, keep]
         return edge_index
 
-    def forward(self, x):
-        # x: (N, C)
-        edge_index = self.build_knn_graph(x)
+    def forward(self, x, batch=None):
+        # x: (B*N, C);  batch: (B*N,) long tensor of sample indices
+        edge_index = self.build_knn_graph(x, batch)
         h = self.W_in(x)
         h = self.graph_conv(h, edge_index)
         h = self.W_out(h)
@@ -120,21 +114,27 @@ class HierarchicalPLGBlock(nn.Module):
     def _label_to_patch_agg(self, label_emb, patch_emb, k):
         """
         For each label node, find k nearest patch nodes and aggregate via max-relative.
-        label_emb : (S, C)
-        patch_emb : (N, C)
-        returns   : (S, C) aggregated context from patches
+        label_emb : (B, S, C)
+        patch_emb : (B, N, C)
+        returns   : (B, S, C) aggregated context from patches
         """
-        # Euclidean distances: (S, N)
-        dists = torch.cdist(label_emb, patch_emb)      # (S, N)
-        topk  = dists.topk(k, dim=-1, largest=False).indices  # (S, k)
+        B, S, C = label_emb.shape
+        N = patch_emb.size(1)
+        k = min(k, N)
+        dists = torch.cdist(label_emb, patch_emb)              # (B, S, N)
+        topk  = dists.topk(k, dim=-1, largest=False).indices   # (B, S, k)
 
-        # Gather patch neighbours
-        neighbours = patch_emb[topk]                   # (S, k, C)
-        diff = neighbours - label_emb.unsqueeze(1)     # (S, k, C)
-        max_diff = diff.max(dim=1).values              # (S, C)
+        # Gather patch neighbours: patch_emb[b, topk[b,s,:], :]
+        topk_flat = topk.reshape(B, -1)                        # (B, S*k)
+        gathered  = patch_emb.gather(
+            1, topk_flat.unsqueeze(-1).expand(-1, -1, C))      # (B, S*k, C)
+        neighbours = gathered.reshape(B, S, k, C)
+        diff = neighbours - label_emb.unsqueeze(2)             # (B, S, k, C)
+        max_diff = diff.max(dim=2).values                      # (B, S, C)
         return max_diff
 
     def forward(self, patch_emb, mood_emb, genre_emb, sub_emb):
+        # All inputs: (B, S, C) or (B, N, C)
         # --- Level 1: mood from patches ---
         ctx_m = self._label_to_patch_agg(mood_emb, patch_emb, self.k)
         mood_emb = self.norm_mood(mood_emb + self.W_mood(
@@ -180,9 +180,9 @@ class HierarchicalLLGBlock(nn.Module):
         self.norm  = nn.LayerNorm(label_dim)
 
     def forward(self, L):
-        """L: (S, C) concatenated mood+genre+sub label embeddings"""
+        """L: (B, S, C) concatenated mood+genre+sub label embeddings"""
         A = torch.sigmoid(self.A_raw) * self.mask   # (S, S) masked soft adjacency
-        L_out = A @ L + L                            # residual aggregation
+        L_out = A.unsqueeze(0) @ L + L              # (1,S,S) @ (B,S,C) -> (B,S,C)
         return self.norm(L_out)
 
 
@@ -511,14 +511,12 @@ class HATGNN(nn.Module):
         feat = feat.flatten(2).permute(0, 2, 1)          # (B, N, pd)
         feat = feat + self.pos_emb[:N].unsqueeze(0)
 
-        # --- PGN blocks (per-sample graph) ---
-        pgn_out = []
-        for b in range(B):
-            x = feat[b]                                  # (N, pd)
-            for pgn in self.pgn_blocks:
-                x = pgn(x)
-            pgn_out.append(x)
-        patch_feats = torch.stack(pgn_out, dim=0)        # (B, N, pd)
+        # --- PGN blocks (batched across samples) ---
+        x_flat = feat.reshape(B * N, feat.size(-1))      # (B*N, pd)
+        batch_vec = torch.arange(B, device=spec.device).repeat_interleave(N)
+        for pgn in self.pgn_blocks:
+            x_flat = pgn(x_flat, batch_vec)
+        patch_feats = x_flat.reshape(B, N, feat.size(-1))  # (B, N, pd)
 
         # --- Global patch representation for heads ---
         patch_global = patch_feats.mean(dim=1)           # (B, pd)
@@ -532,31 +530,25 @@ class HATGNN(nn.Module):
         # --- Patch logits ---
         y_patch = self.patch_head(patch_feats.permute(0, 2, 1))  # (B, n_labels)
 
-        # --- Label embeddings ---
-        mood_idx = torch.arange(self.cfg.n_mood,    device=spec.device)
-        gen_idx  = torch.arange(self.cfg.n_genre,   device=spec.device)
-        sub_idx  = torch.arange(self.cfg.n_subgenre,device=spec.device)
+        # --- Label embeddings (batched) ---
+        mood_idx = torch.arange(self.cfg.n_mood,     device=spec.device)
+        gen_idx  = torch.arange(self.cfg.n_genre,    device=spec.device)
+        sub_idx  = torch.arange(self.cfg.n_subgenre, device=spec.device)
 
-        # Per-sample label refinement
-        label_logits = []
-        for b in range(B):
-            pf = self.patch_proj(patch_feats[b])         # (N, d)
-            m  = self.mood_emb(mood_idx)                 # (n_mood, d)
-            g  = self.genre_emb(gen_idx)                 # (n_genre, d)
-            s  = self.subgenre_emb(sub_idx)              # (n_sub, d)
+        pf = self.patch_proj(patch_feats)                # (B, N, d)
+        m  = self.mood_emb(mood_idx).unsqueeze(0).expand(B, -1, -1)     # (B, n_mood, d)
+        g  = self.genre_emb(gen_idx).unsqueeze(0).expand(B, -1, -1)
+        s  = self.subgenre_emb(sub_idx).unsqueeze(0).expand(B, -1, -1)
 
-            # H-PLG
-            m, g, s = self.hplg(pf, m, g, s)
+        # H-PLG (batched)
+        m, g, s = self.hplg(pf, m, g, s)
 
-            # H-LLG
-            L = torch.cat([m, g, s], dim=0)              # (n_all, d)
-            L = self.hllg(L)
+        # H-LLG (batched)
+        L = torch.cat([m, g, s], dim=1)                  # (B, n_all, d)
+        L = self.hllg(L)
 
-            # Readout: dot each label emb with its learned output vector
-            logit = (L * self.W_out).sum(-1)             # (n_all,)
-            label_logits.append(logit)
-
-        y_label = torch.stack(label_logits, dim=0)       # (B, n_all)
+        # Readout
+        y_label = (L * self.W_out.unsqueeze(0)).sum(-1)  # (B, n_all)
 
         y = torch.sigmoid(y_patch + y_label)             # (B, n_all)
         return y
