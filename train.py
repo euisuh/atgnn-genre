@@ -216,6 +216,8 @@ def parse_args():
                    help="Consistency loss weight")
     p.add_argument("--epochs",     type=int,   default=50)
     p.add_argument("--batch_size", type=int,   default=24)
+    p.add_argument("--max_steps",  type=int,   default=None,
+                   help="Cap batches per epoch (smoke test use)")
     p.add_argument("--lr",         type=float, default=5e-4)
     p.add_argument("--run_name",   type=str,   default=None)
     p.add_argument("--data_root",  type=str,   default="data/mtg_jamendo")
@@ -282,6 +284,7 @@ def build_config(args) -> HATGNNConfig:
     )
     # Attach resume path (not a dataclass field, just a dynamic attr)
     cfg.resume = getattr(args, "resume", None)
+    cfg.max_steps = getattr(args, "max_steps", None)
     return cfg
 
 
@@ -305,13 +308,18 @@ def get_lr_scheduler(optimizer, warmup_steps: int, total_steps: int,
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def train_one_epoch(model, loader, criterion, optimizer, scheduler, device):
+def train_one_epoch(model, loader, criterion, optimizer, scheduler, device,
+                    max_steps=None):
     model.train()
     total_loss  = 0.0
     total_gnorm = 0.0
     n_batches   = 0
 
     for batch in loader:
+        if max_steps is not None and n_batches >= max_steps:
+            break
+        if batch is None:
+            continue
         spec     = batch["spec"].to(device)
         waveform = batch["waveform"].to(device)
         labels   = batch["labels"].to(device)
@@ -343,6 +351,8 @@ def evaluate_epoch(model, loader, device, cfg):
     all_preds, all_targets = [], []
 
     for batch in loader:
+        if batch is None:
+            continue
         spec     = batch["spec"].to(device)
         waveform = batch["waveform"].to(device)
         labels   = batch["labels"].numpy()
@@ -451,7 +461,8 @@ def run_experiment(cfg, run_name: str, device: str,
         t0 = time.time()
 
         train_loss, grad_norm = train_one_epoch(
-            model, train_loader, criterion, optimizer, scheduler, device
+            model, train_loader, criterion, optimizer, scheduler, device,
+            max_steps=getattr(cfg, "max_steps", None),
         )
         val_metrics = evaluate_epoch(model, val_loader, device, cfg)
         elapsed     = time.time() - t0
