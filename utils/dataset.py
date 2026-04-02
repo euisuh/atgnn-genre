@@ -184,27 +184,44 @@ class MTGJamendoDataset(Dataset):
         track_id   = row["track_id"]
         audio_path = os.path.join(self.root, "audio", row["path"])
 
-        try:
-            waveform = self._load_audio(audio_path)
-        except Exception:
-            # Corrupt or missing file — return a silent waveform
-            max_samples = self.max_frames * self.hop_len
+        spec_path  = audio_path.replace(".mp3", ".spec.pt")
+        if os.path.exists(spec_path):
+            # Fast path: load pre-computed log-mel spectrogram (float16 → float32)
+            try:
+                spec = torch.load(spec_path, weights_only=True,
+                                  map_location="cpu").float()
+            except Exception:
+                spec = None
+        else:
+            spec = None
+
+        max_samples = self.max_frames * self.hop_len
+
+        if spec is None:
+            # Slow path: decode mp3 on-the-fly (fallback when precompute hasn't run,
+            # or for SSL backbones that need raw waveform).
+            try:
+                waveform = self._load_audio(audio_path)
+            except Exception:
+                # Corrupt file — skip by returning None; collate_fn drops it.
+                return None
+            spec = self._to_logmel(waveform)          # (1, F, T)
+            # Pad/crop waveform to fixed length
+            T_wav = waveform.shape[-1]
+            if T_wav < max_samples:
+                waveform = F.pad(waveform, (0, max_samples - T_wav))
+            else:
+                waveform = waveform[..., :max_samples]
+        else:
+            # Fast path: spec loaded from cache. CNN backbone ignores waveform;
+            # SSL backbones (MERT/MuQ) use precomputed cross-modal embeddings instead.
             waveform = torch.zeros(1, max_samples)
-        spec     = self._to_logmel(waveform)          # (1, F, T)
 
         if self.augment:
             spec = self._freq_time_mask(spec)
 
         mood_vec, genre_vec, sub_vec = self._parse_labels(row)
         labels = np.concatenate([mood_vec, genre_vec, sub_vec])
-
-        # Pad/crop waveform to fixed length (max_frames * hop_len samples)
-        max_samples = self.max_frames * self.hop_len
-        T = waveform.shape[-1]
-        if T < max_samples:
-            waveform = F.pad(waveform, (0, max_samples - T))
-        else:
-            waveform = waveform[..., :max_samples]
 
         item = {
             "spec":     spec,
@@ -224,11 +241,22 @@ class MTGJamendoDataset(Dataset):
         return item
 
 
+def collate_skip_none(batch):
+    """Default collate that drops None items (corrupt files)."""
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+    return torch.utils.data.dataloader.default_collate(batch)
+
+
 def collate_mixup(batch, alpha=0.5):
     """
     Mixup augmentation at the batch level.
     Mixes pairs of (spec, waveform, label) within the batch.
     """
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
     specs     = torch.stack([b["spec"]     for b in batch])
     waveforms = torch.stack([b["waveform"] for b in batch])
     labels    = torch.stack([b["labels"]   for b in batch])
@@ -296,9 +324,9 @@ def get_dataloaders(cfg):
                               collate_fn=collate, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size,
                               shuffle=False, num_workers=4,
-                              pin_memory=True)
+                              collate_fn=collate_skip_none, pin_memory=True)
     test_loader  = DataLoader(test_ds,  batch_size=cfg.batch_size,
                               shuffle=False, num_workers=4,
-                              pin_memory=True)
+                              collate_fn=collate_skip_none, pin_memory=True)
 
     return train_loader, val_loader, test_loader
