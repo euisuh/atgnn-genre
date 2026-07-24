@@ -1,0 +1,20 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # ponytail: syntax-only. No torch/PyG install (GPU-only deps, multi-GB);
+      # add a real test job when a CPU-runnable unit test exists.
+      - name: Python syntax
+        run: python -m compileall -q configs models scripts utils train.py
+      - name: Shell syntax
+        run: for f in cloud/*.sh; do bash -n "$f"; done
