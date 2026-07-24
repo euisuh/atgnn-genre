@@ -1,64 +1,132 @@
-# H-ATGNN: Hierarchical Audio Tagging Graph Neural Network
+# H-ATGNN — Hierarchical Audio Tagging Graph Neural Network
 
-Extension of ATGNN (Singh et al., 2024) for hierarchical music genre classification
-using graph embeddings, audio embeddings, and text embeddings.
+Research code for hierarchical music auto-tagging on
+[MTG-Jamendo](https://mtg.github.io/mtg-jamendo-dataset/): a graph neural network
+that jointly predicts **mood → genre → sub-genre** labels, with the label
+hierarchy encoded directly in the message-passing graph.
 
-## Architecture overview
+The model extends **ATGNN** (Singh et al., *Audio Tagging Graph Neural Network*,
+IEEE Signal Processing Letters, 2024) along three axes — text-initialised label
+embeddings, a DAG-masked label hierarchy, and cross-modal (CLAP / MuQ-MuLan)
+fusion — each of which is independently ablatable from the CLI.
+
+> **Status:** active research code. The full training pipeline (data → precompute
+> → train → evaluate) runs end-to-end on GPU; final experiment results are not yet
+> committed to this repo, so no metrics are reported below. Session-by-session
+> engineering notes live in [`reports/`](reports/).
+
+---
+
+## Research context
+
+| | |
+|---|---|
+| **Base method** | ATGNN (Singh et al., IEEE SPL 2024) — patch-graph + patch-label-graph audio tagging |
+| **This work** | H-ATGNN: adds a label ontology (8 moods → 15 genres → 48 sub-genres) as a DAG mask over the label-label graph, plus text-LM label initialisation and cross-modal fusion |
+| **Dataset** | MTG-Jamendo (autotagging genre + mood/theme subsets, official split-0) |
+| **Target claim** | Hierarchical message passing propagates signal from well-represented parent genres to rare sub-genres, narrowing the common-vs-rare mAP gap. Measured by `compute_rare_class_metrics` and `compute_consistency` in `utils/metrics.py` |
+| **Write-up** | Manuscript prepared for KSMI / OpenReview submission (not in this repo) |
+
+### Architecture
 
 ```
-Audio -> CNN backbone -> PGN blocks  ─┐
-Audio -> CLAP encoder               ─┤─> Gated fusion -> H-PLG -> H-LLG -> Heads
-Labels -> Text LM (frozen)          ─┘   (mood -> genre -> sub-genre DAG)
+Audio ─► CNN | MERT | MuQ backbone ─► PGN blocks (k-NN patch graph) ─┐
+Audio ─► CLAP / MuQ-MuLan encoder ──────────────────────────────────┤─► Gated fusion
+Labels ─► Sentence-Transformer (frozen) ────────────────────────────┘        │
+                                                                             ▼
+                                              H-PLG (level-wise patch→label) ─► H-LLG
+                                              (DAG-masked label→label)        ─► heads
 ```
 
-Three ablation axes:
-- **Text init**: initialise label embeddings from sentence-transformers instead of random
-- **Hierarchy**: DAG-masked LLG + level-wise H-PLG message passing
-- **CLAP fusion**: gated fusion of patch features with CLAP audio embeddings
+Ablation axes (`train.py` flags):
+
+- `--text_init` — initialise label embeddings from `all-mpnet-base-v2` instead of randomly
+- `--hierarchy` — DAG-masked H-LLG + level-wise H-PLG message passing
+- `--clap` / `--cross_modal {clap,muqmulan}` — gated fusion of patch features with a
+  pretrained audio-text embedding
+- `--backbone {cnn,mert,muq}` — CNN (Table 1) vs. self-supervised backbones (Table 2)
+
+Loss: BCE over all labels + `--lam`-weighted hierarchical consistency term
+(`HierarchicalLoss`, `models/hatgnn.py`) that penalises child predictions
+exceeding their parent's.
+
+---
+
+## Repository structure
+
+```
+train.py                        Training loop, ablation runner, CLI
+models/
+  hatgnn.py                     HATGNN, PGN / H-PLG / H-LLG blocks, backbones,
+                                GatedFusion, MuQLanEmbedder, HierarchicalLoss
+utils/
+  hierarchy.py                  Mood→genre→sub-genre ontology + DAG mask builder
+  dataset.py                    MTG-Jamendo loader (cached specs, mixup, SpecAugment)
+  text_embeddings.py            Sentence-Transformer label embedding generator
+  metrics.py                    mAP, hierarchy consistency, rare-class metrics
+configs/default.py              HATGNNConfig dataclass (all hyperparameters)
+scripts/
+  download_mtg_jamendo.py       Dataset downloader / verifier
+  precompute_spectrograms.py    Offline log-mel cache (.spec.pt)
+  precompute_clap.py            Offline CLAP audio embeddings
+  precompute_muqmulan.py        Offline MuQ-MuLan audio embeddings
+  verify_setup.py               Environment checker
+cloud/
+  setup.sh                      Dependency installer (auto-detects CUDA version)
+  download_data.sh              Dataset download to persistent volume + symlinks
+  run_experiment.sh             Launcher: data check → embeddings → train
+  run_chain.sh                  Smoke test → wait for data → experiments → shutdown
+reports/                        Dated engineering session reports
+```
+
+---
 
 ## Setup
 
+Python 3.10+, PyTorch 2.x. PyTorch Geometric extensions must match your CUDA build.
+
 ```bash
-# 1. Install core 
 pip install torch torchaudio
-pip install --no-build-isolation torch-scatter
-pip install --no-build-isolation torch-sparse
 pip install -r requirements.txt
 
-# 2. Install PyG — match your CUDA version:
-#    CUDA 11.8:
-pip install torch-geometric
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cu118.html
-#    CUDA 12.1:
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
-#    CPU only:
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cpu.html
+# PyG extensions — pick the index matching your torch/CUDA build, e.g. torch 2.4 + cu124:
+pip install torch_geometric
+pip install torch_scatter torch_sparse torch_cluster torch_spline_conv \
+    -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
+# CPU-only: -f https://data.pyg.org/whl/torch-2.4.0+cpu.html
+```
 
-# 3. (Optional) CLAP backend — pick one:
-pip install laion-clap          # recommended, faster
-# OR: transformers already in requirements.txt covers this
+`torch_cluster` is **required** (not optional): `PGNBlock` calls `knn_graph` on
+every forward pass.
 
-# 4. Verify everything is installed correctly
+Verify:
+
+```bash
 python scripts/verify_setup.py
 ```
 
-## Data
+Optional: `pip install laion-clap` for the CLAP backend, `wandb` for logging
+(`--wandb_project`).
+
+---
+
+## Reproduction
+
+### 1. Data
 
 ```bash
-# Download metadata + splits only (fast, ~50MB, no audio yet)
+# Metadata + official splits only (~50 MB)
 python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --meta_only
 
-# Download audio — chunk 0 only (~3.2GB, ~5000 tracks, enough for a quick test)
+# Audio, one chunk (~3.2 GB, enough for a smoke test)
 python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --chunks 0
 
-# Download more chunks for full experiments (each ~3.2GB, 100 chunks total)
-python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --chunks 0 1 2 3 4
-
-# Verify the download
+# Verify
 python scripts/download_mtg_jamendo.py --output data/mtg_jamendo --verify
 ```
 
-Expected structure:
+Expected layout:
+
 ```
 data/mtg_jamendo/
   autotagging_moodtheme.tsv
@@ -67,175 +135,143 @@ data/mtg_jamendo/
   audio/00/track_0000000.mp3 ...
 ```
 
-## Step 1: Generate text label embeddings (run once)
+### 2. Precompute (strongly recommended)
+
+Decoding mp3 + computing mel spectrograms at training time is the dominant
+bottleneck — the GPU sits idle waiting on the dataloader. Cache them once:
+
+```bash
+python scripts/precompute_spectrograms.py --data_root data/mtg_jamendo
+```
+
+`dataset.py` picks up `<track>.spec.pt` automatically and falls back to on-the-fly
+decoding when a cache file is missing.
+
+Cross-modal embeddings (only needed for `--cross_modal`):
+
+```bash
+python scripts/precompute_clap.py      --data_root data/mtg_jamendo
+python scripts/precompute_muqmulan.py  --data_root data/mtg_jamendo
+```
+
+### 3. Label text embeddings (run once)
 
 ```bash
 python -m utils.text_embeddings \
     --model sentence-transformers/all-mpnet-base-v2 \
     --output embeddings/label_embs.pt \
-    --analyse        # prints nearest-neighbour sanity check
+    --analyse          # nearest-neighbour sanity check
 ```
 
-## Step 2: Train
+### 4. Train
 
-### Full model (H-ATGNN)
 ```bash
-python train.py --text_init --hierarchy --clap --epochs 50
-```
-
-### Run all 6 ablations sequentially
-```bash
-python train.py --run_all_ablations --epochs 50
-```
-
-### Individual ablations
-```bash
-# Baseline (ATGNN replication)
-python train.py --run_name baseline
-
-# + Text LM init only
-python train.py --text_init --run_name text_init_only
-
-# + Hierarchy only
-python train.py --hierarchy --run_name hierarchy_only
-
-# + CLAP only
-python train.py --clap --run_name clap_only
-
-# Text + Hierarchy (no CLAP)
-python train.py --text_init --hierarchy --run_name text_hierarchy
+# Smoke test — a few steps, verifies the whole path
+python train.py --epochs 1 --max_steps 20 --batch_size 8
 
 # Full model
-python train.py --text_init --hierarchy --clap --run_name full_hatgnn
-```
+python train.py --text_init --hierarchy --clap --epochs 50 --run_name full_hatgnn
 
-### Lambda sweep (for Table 2)
-```bash
+# Table 1 — all six CNN ablations, sequentially
+python train.py --run_all_ablations --epochs 50
+
+# Table 2 — self-supervised backbones
+python train.py --run_ssl_experiments --epochs 50
+
+# Consistency-loss weight sweep
 for lam in 0.1 0.3 0.5 1.0; do
-    python train.py --text_init --hierarchy --clap \
-        --lam $lam --run_name "lam_${lam}"
+    python train.py --text_init --hierarchy --clap --lam $lam --run_name "lam_${lam}"
 done
 ```
 
-## Step 3: Evaluate and summarise
+Individual ablations:
 
-Results are saved to `outputs/{run_name}/results.json` after each run.
+| Run | Command |
+|---|---|
+| Baseline (ATGNN replication) | `python train.py --run_name baseline` |
+| + text init | `python train.py --text_init --run_name text_init_only` |
+| + hierarchy | `python train.py --hierarchy --run_name hierarchy_only` |
+| + CLAP | `python train.py --clap --run_name clap_only` |
+| text + hierarchy | `python train.py --text_init --hierarchy --run_name text_hierarchy` |
+| full | `python train.py --text_init --hierarchy --clap --run_name full_hatgnn` |
 
-After `--run_all_ablations`, a full summary table is printed and saved to
-`outputs/ablation_summary.json`.
+Training checkpoints every epoch to `outputs/{run_name}/last.pt`; resume with
+`--resume outputs/{run_name}/last.pt`.
 
-## Expected results (MTG-Jamendo)
+### 5. Evaluate
 
-| Model            | Text | Hier | CLAP | mAP all | mAP genre | mAP mood | Consistency |
-|------------------|------|------|------|---------|-----------|----------|-------------|
-| Baseline (ATGNN) |      |      |      | 0.312   | 0.298     | 0.326    | 71.2%       |
-| + Text init      |  Y   |      |      | 0.321   | 0.309     | 0.333    | 73.8%       |
-| + Hierarchy      |      |  Y   |      | 0.328   | 0.318     | 0.338    | 84.6%       |
-| + CLAP           |      |      |  Y   | 0.331   | 0.314     | 0.348    | 72.1%       |
-| Text + Hierarchy |  Y   |  Y   |      | 0.339   | 0.331     | 0.347    | 87.3%       |
-| H-ATGNN (full)   |  Y   |  Y   |  Y   | 0.351   | 0.344     | 0.359    | 93.4%       |
-
-Numbers are targets based on literature estimates. Actual results may vary.
-
-## Key finding (paper argument)
-
-The rare sub-genre gap (mAP_common - mAP_rare) narrows most dramatically
-for H-ATGNN vs all baselines and AST. This is the core publishable claim.
-
-## Running on a cloud GPU (Lambda Labs)
-
-Local CPU training is only suitable for smoke tests. For real experiments use a
-cloud GPU instance with persistent storage so the dataset survives across runs.
-
-### Recommended setup
-
-| Need | Recommendation | Why |
-|------|---------------|-----|
-| GPU instance | [Lambda Labs](https://lambdalabs.com/service/gpu-cloud) | Simple hourly billing, A100s available |
-| Persistent storage | Lambda Filesystem | Attaches to any instance; dataset survives termination |
-| Instance for CNN runs | A10 (24 GB, ~$0.75/hr) | Fits batch_size=32 comfortably |
-| Instance for MERT runs | A100 40 GB (~$1.29/hr) | MERT needs ≥24 GB VRAM for batch_size=16 |
-| Storage size | 100 GB filesystem | 64 GB data + outputs headroom |
-
-### One-time: create persistent storage
-
-1. Lambda Cloud dashboard → **Storage → Create filesystem**
-2. Name it `mtg-jamendo`, pick the same region as your instances
-3. Note the mount path shown (e.g. `/home/ubuntu/storage`)
-
-### Every new instance: 3-step setup
-
-```bash
-# 1. Clone repo
-git clone https://github.com/euisuh/atgnn-genre.git
-cd atgnn-genre
-
-# 2. Install dependencies (~3 min, auto-detects CUDA version)
-bash cloud/setup.sh
-
-# 3. Download dataset to persistent storage (first time only, ~64 GB)
-export LAMBDA_STORAGE=/home/ubuntu/storage    # adjust to your mount path
-bash cloud/download_data.sh                   # stratified 20 chunks — recommended
-# bash cloud/download_data.sh --small         # 10 chunks ~32 GB, quick test
-# bash cloud/download_data.sh --full          # all 100 chunks ~320 GB
-```
-
-If the storage already has the dataset from a previous instance, step 3 just
-re-creates the symlinks instantly — no re-download needed.
-
-### Running experiments on the cluster
-
-```bash
-export LAMBDA_STORAGE=/home/ubuntu/storage
-
-# Table 1 — all 6 CNN ablations
-bash cloud/run_experiment.sh --run_all_ablations --epochs 50
-
-# Table 2 — MERT backbone
-bash cloud/run_experiment.sh --backbone mert --text_init --hierarchy --clap \
-    --run_name hatgnn_mert --epochs 50
-
-# Lambda sweep
-for lam in 0.1 0.3 0.5 1.0; do
-    bash cloud/run_experiment.sh --text_init --hierarchy --clap \
-        --lam $lam --run_name lam_${lam} --epochs 50
-done
-```
-
-Results are saved to `${LAMBDA_STORAGE}/outputs/` and persist after instance
-termination. Pull them back locally with:
-
-```bash
-rsync -avz ubuntu@<instance-ip>:/home/ubuntu/storage/outputs/ outputs/
-```
+Metrics are computed at the end of each run and written to
+`outputs/{run_name}/results.json` (overall / genre / mood mAP, hierarchy
+consistency, common-vs-rare sub-genre gap). `--run_all_ablations` additionally
+prints a summary table and writes `outputs/ablation_summary.json`.
 
 ---
 
-## Project structure
+## Running on a cloud GPU
 
+Local CPU training is smoke-test only. The `cloud/` scripts target RunPod (and
+work on any box with a persistent volume). Set `STORAGE_ROOT` to the volume mount
+path — `/workspace` on RunPod pods, `/runpod-volume` for a Network Volume,
+`/home/ubuntu/storage` on Lambda Labs.
+
+```bash
+git clone https://github.com/euisuh/atgnn-genre.git && cd atgnn-genre
+bash cloud/setup.sh                       # deps, auto-detects CUDA
+
+export STORAGE_ROOT=/workspace
+bash cloud/download_data.sh               # 20 stratified chunks (~64 GB), default
+# --small (10 chunks) | --full (all 100) | --chunks 0 5 10 | --meta_only
+
+bash cloud/run_experiment.sh --run_all_ablations --epochs 50
 ```
-models/
-  hatgnn.py          Main model: CNNBackbone, MERTBackbone, PGN, H-PLG, H-LLG
-utils/
-  hierarchy.py       Mood->genre->sub-genre ontology + mask builder
-  dataset.py         MTG-Jamendo dataset loader with mixup + SpecAugment
-  text_embeddings.py Sentence-transformer label embedding generator
-  metrics.py         mAP, consistency score, rare class metrics
-configs/
-  default.py         HATGNNConfig dataclass
-cloud/
-  setup.sh           Dependency installer (auto-detects CUDA version)
-  download_data.sh   Dataset downloader with stratified chunk selection
-  run_experiment.sh  End-to-end launcher (data check → embeddings → train)
-train.py             Training script + ablation runner
-scripts/
-  verify_setup.py    Environment checker
-  download_mtg_jamendo.py  Dataset download utility
+
+Chunks are downloaded evenly spaced rather than sequentially: MTG-Jamendo orders
+tracks by ID, so consecutive chunks skew toward a narrow slice of the catalogue.
+
+Fully automated pipeline (smoke test → wait for download → experiments → shutdown):
+
+```bash
+AUTO_SHUTDOWN=1 bash cloud/run_chain.sh --table 1
 ```
+
+Data, embeddings and outputs live under `${STORAGE_ROOT}` and are symlinked into
+the repo, so they survive pod termination. Pull results back with:
+
+```bash
+rsync -avz <user>@<host>:${STORAGE_ROOT}/outputs/ outputs/
+```
+
+See [`cloud/README.md`](cloud/README.md) for instance-type recommendations.
+
+---
+
+## Contributions
+
+- **H-LLG** — label-label graph attention masked by a mood→genre→sub-genre DAG, so
+  a label only exchanges messages with its ontological neighbours instead of all
+  labels (`HierarchicalLLGBlock`, `utils/hierarchy.build_hierarchy`).
+- **H-PLG** — level-wise patch→label message passing, with separate k-NN
+  neighbourhoods per hierarchy level.
+- **Text-initialised label nodes** — label embeddings seeded from a frozen
+  sentence-transformer, giving the label graph semantic structure before training.
+- **Cross-modal gated fusion** — CLAP or MuQ-MuLan clip embeddings fused into
+  patch features through a learned gate, with an offline precompute path so the
+  frozen encoder never runs in the training loop.
+- **Hierarchical consistency loss** — penalises a child label scoring above its
+  parent; reported as an explicit consistency metric alongside mAP.
+- **Reproduction harness** — single-flag ablations, one-command cloud runs, offline
+  spectrogram/embedding caches, resumable checkpoints.
+
+Engineering decisions and their rationale are logged per session in
+[`reports/`](reports/).
+
+---
 
 ## Citation
 
-If you use this code, please cite:
-- Singh et al., "ATGNN: Audio Tagging Graph Neural Network", IEEE SPL 2024
-- Bogdanov et al., "The MTG-Jamendo Dataset for Automatic Music Tagging", 2019
-- LAION-CLAP: Wu et al., "Large-Scale Contrastive Language-Audio Pretraining", ICASSP 2023
+This repository builds on:
+
+- Singh et al., *ATGNN: Audio Tagging Graph Neural Network*, IEEE Signal Processing Letters, 2024
+- Bogdanov et al., *The MTG-Jamendo Dataset for Automatic Music Tagging*, ICML ML4MD Workshop, 2019
+- Wu et al., *Large-Scale Contrastive Language-Audio Pretraining (CLAP)*, ICASSP 2023
+- Zhu et al., *MuQ / MuQ-MuLan: Self-Supervised Music Representation Learning*, 2025
