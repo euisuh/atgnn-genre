@@ -1,6 +1,10 @@
-torch
-torchaudio
-torch-geometric
+# Pinned to the environment recorded in reports/2026-04-02.md (RTX 4090 pod,
+# torch 2.4.1+cu124, PyG 2.7.0). Other packages were installed unpinned at the
+# time and their versions were not recorded, so they are left unpinned here.
+# PyG extensions (torch-scatter/sparse/cluster) need a wheel index; see README.
+torch==2.4.1
+torchaudio==2.4.1
+torch-geometric==2.7.0
 torch-scatter
 torch-sparse
 sentence-transformers

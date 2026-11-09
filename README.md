@@ -76,6 +76,7 @@ cloud/
   download_data.sh              Dataset download to persistent volume + symlinks
   run_experiment.sh             Launcher: data check → embeddings → train
   run_chain.sh                  Smoke test → wait for data → experiments → shutdown
+tests/                          CPU unit tests for hierarchy mask and metrics
 reports/                        Dated engineering session reports
 ```
 
@@ -86,7 +87,9 @@ reports/                        Dated engineering session reports
 Python 3.10+, PyTorch 2.x. PyTorch Geometric extensions must match your CUDA build.
 
 ```bash
-pip install torch torchaudio
+# requirements.txt pins torch/torchaudio 2.4.1 and torch-geometric 2.7.0, the
+# versions recorded in reports/2026-04-02.md. Install a CUDA build of torch first
+# if you need GPU (see pytorch.org); the default PyPI wheel is what pip picks otherwise.
 pip install -r requirements.txt
 
 # PyG extensions — pick the index matching your torch/CUDA build, e.g. torch 2.4 + cu124:
@@ -103,6 +106,12 @@ Verify:
 
 ```bash
 python scripts/verify_setup.py
+```
+
+CPU-only unit tests (ontology, DAG mask, metrics; no audio or PyG needed):
+
+```bash
+pip install pytest && python -m pytest -q tests
 ```
 
 Optional: `pip install laion-clap` for the CLAP backend, `wandb` for logging
@@ -264,6 +273,12 @@ See [`cloud/README.md`](cloud/README.md) for instance-type recommendations.
 
 Engineering decisions and their rationale are logged per session in
 [`reports/`](reports/).
+
+---
+
+## License
+
+MIT (see [`LICENSE`](LICENSE)).
 
 ---
 
